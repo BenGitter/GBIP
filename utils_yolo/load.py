@@ -1,10 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms.functional as TF
 from torch.optim.lr_scheduler import ExponentialLR
-
-import random
 
 from utils_yolo.general import check_img_size, colorstr, labels_to_class_weights
 from utils_yolo.datasets import create_dataloader
@@ -87,8 +84,7 @@ def create_param_groups(model):
 
 def create_optimizer(model, hyp):
     pg0, pg1, pg2 = create_param_groups(model)
-    print(len(pg0),len(pg1),len(pg2))
-    # assert len(pg0) == 55 and len(pg1) == 58*2 and len(pg2) == 58, 'Found {}, {}, {}'.format(len(pg0), len(pg1), len(pg2))
+    assert len(pg0) == 55 and len(pg1) == 58 and len(pg2) == 58, 'Found {}, {}, {}'.format(len(pg0), len(pg1), len(pg2))
     optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})
     optimizer.add_param_group({'params': pg2})
@@ -102,6 +98,13 @@ def load_model(yolo_struct, nc, anchors, weights, device):
     state_dict = ckpt['model'].float().state_dict()
     model.load_state_dict(state_dict, strict=False) 
     del ckpt, state_dict
+    return model.to(device)
+
+def load_gbip_model(ckpt, nc, anchors, device):
+    ckpt = torch.load(ckpt, map_location=device)
+    model = Model(ckpt['struct'], nc=nc, anchors=anchors)
+    model.load_state_dict(ckpt['state_dict'], strict=False) 
+    del ckpt
     return model.to(device)
 
 def load_data(model, img_size, data_dict, batch_size, hyp, num_workers, device, augment=True):

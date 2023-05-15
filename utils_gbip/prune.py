@@ -113,7 +113,7 @@ def fix_input_detect(model, idx):
         l.m[i] = get_new_conv(l.m[i], 1, cin_remove)
 
 @torch.no_grad()
-def prune_step(model, img_batch, k, device):
+def prune_step(model, img_batch, k, device, verbose=False):
     model.eval()
     model.to(device)
     x = img_batch.to(device).float() / 255.0
@@ -131,7 +131,8 @@ def prune_step(model, img_batch, k, device):
         m_l = m_l / torch.max(m_l)
         m_l_p = k * torch.sum(m_l) / l.conv.out_channels
         cout_remove = (m_l < m_l_p).nonzero().squeeze(1).tolist()
-        print(cout_remove)
+        if verbose:
+            print(cout_remove)
 
         # set indices of channels to be removed
         l.cout_remove = cout_remove
@@ -154,6 +155,12 @@ def prune_step(model, img_batch, k, device):
         l.bn = get_new_norm(l.bn, l.cout_remove)
         l.cout_removed = l.cout_remove
         del l.cout_remove
+
+        # update yaml
+        if l.i < len(model.yaml['backbone']):
+            model.yaml['backbone'][l.i][3][0] = l.conv.out_channels
+        else:
+            model.yaml['head'][l.i-len(model.yaml['backbone'])][3][0] = l.conv.out_channels
     
     # make sure input channels of Detect() still match
     fix_input_detect(model, l_detect)
