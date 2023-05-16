@@ -6,17 +6,18 @@ import torch
 import yaml
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 
-from utils_yolo.load import load_model, load_data, create_optimizer
-from utils_yolo.general import check_dataset, fitness
+from utils_yolo.load import load_model, load_gbip_model, load_data, create_optimizer
+from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
 from utils_yolo.test import test
-from utils_yolo.loss import ComputeLossOTA
+from utils_yolo.loss2 import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 10 # 30
+N = 2 # 30
 sp = 10 # 10
-k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.2 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 batch_size = 16
 nbs = 64 # nominal batch size
@@ -32,7 +33,17 @@ hyp = './data/hyp.scratch.tiny.yaml'
 struct_file = './data/yolov7_tiny_struct.yaml'
 teacher_weights = './data/yolov7-tiny.pt'
 
+save_dir = Path(increment_path(Path('tmp/training'), exist_ok=False))
+wdir = save_dir / 'weights'
+last = wdir / 'last.pth'
+best = wdir / 'best.pth'
+results_file = save_dir / 'results.txt'
+
 if __name__ == "__main__":
+    # create dirs
+    os.makedirs(wdir, exist_ok=True)
+    init_seeds(1)
+
     # open data info
     with open(hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)
@@ -41,14 +52,14 @@ if __name__ == "__main__":
     with open(data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)
     with open(struct_file) as f:
-        yolo_strstruct_fileuct = yaml.load(f, Loader=yaml.SafeLoader)
+        struct_file = yaml.load(f, Loader=yaml.SafeLoader)
     check_dataset(data_dict)
 
     # init models
     nc = int(data_dict['nc'])
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     cuda = device.type != 'cpu'
-    # model_T = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device).eval() # teacher model
+    model_T = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device).eval() # teacher model
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
     # model_G = # adversarial model
 
@@ -59,9 +70,9 @@ if __name__ == "__main__":
 
     # optimizer + scaler + loss
     optimizer, scheduler = create_optimizer(model_S, hyp)
-    compute_loss = ComputeLossOTA(model_S)
+    compute_loss = ComputeLossOTA(model_S, model_T=model_T)
 
-    print(('%10s' * 7) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels'))
+    best_fitness = 0
     for epoch in range(N):
         # prune student model every sp epochs
         if epoch % sp == 0:
@@ -71,26 +82,29 @@ if __name__ == "__main__":
             # for i in range(3):
             #     batch = torch.cat((batch, next(data_iter)[0]))
             # prune student model
+            print('pruning')
             prune_step(model_S, batch, k, device)
             optimizer, scheduler = create_optimizer(model_S, hyp)
             del data_iter, batch
         
-        mloss = torch.zeros(4, device=device)
+        mloss = torch.zeros(7, device=device)
         optimizer.zero_grad()
-        pbar = tqdm(enumerate(dataloader), total=nb)
         ix = 0
+        model_S.train()
+        print(('%10s' * 10) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'total', 'labels'))
+        pbar = tqdm(enumerate(dataloader), total=nb)
         for i, (imgs, targets, paths, _) in pbar:
             ni = i + nb * epoch +1
             imgs = imgs.to(device, non_blocking=True).float() / 255.0
+            targets = targets.to(device)
 
             # update model_G (while keeping model_S fixed)
             
 
             # update model_S (while keeping model_G fixed)
-            model_S.train()
             # forward pass
             pred = model_S(imgs)
-            loss, loss_items = compute_loss(pred, targets.to(device), imgs)
+            loss, loss_items = compute_loss(pred, targets, imgs)
 
             # backprop
             loss.backward()
@@ -106,18 +120,18 @@ if __name__ == "__main__":
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-            s = ('%10s' * 2 + '%10.4g' * 5) % (
+            s = ('%10s' * 2 + '%10.4g' * 8) % (
                 '%g/%g' % (epoch, N - 1), mem, *mloss, targets.shape[0])
             pbar.set_description(s)
 
-            # if ix == 10:
-            #     break
+            if ix == 10:
+                break
 
         # end batch
         scheduler.step()
 
         # run validation at end of each epoch
-        results = test(
+        results, maps = test(
             data_dict,
             batch_size=batch_size * 2,
             imgsz=imgsz_test,
@@ -127,10 +141,43 @@ if __name__ == "__main__":
             is_coco=True,
             plots=False,
             iou_thres=0.65
-        )[0]
+        )[0:2]
+        print('Person mAP:', maps[0])
         fi = fitness(np.array(results).reshape(1, -1))
-        print('Fitness:', fi)
+        if fi > best_fitness:
+            best_fitness = fi
+            print('Found higher fitness:', best_fitness)
+        else:
+            print('Fitness not higher:', fi)
+
+        # save last + best
+        torch.save({
+            'state_dict': model_S.state_dict(),
+            'struct': model_S.yaml
+        }, last)
+        if best_fitness == fi:
+            torch.save({
+                'state_dict': model_S.state_dict(),
+                'struct': model_S.yaml
+            }, best)
     # end epoch
+
+    # test best.pth
+    results, _, _, stats = test(
+        data_dict,
+        batch_size=batch_size * 2,
+        imgsz=imgsz_test,
+        conf_thres=0.001,
+        iou_thres=0.65,
+        model=load_gbip_model(best, nc, hyp.get('anchors'), device),
+        dataloader=testloader,
+        save_dir=save_dir,
+        save_json=True,
+        plots=True,
+        is_coco=True
+    )
+    torch.cuda.empty_cache()
+
 
 # Effect of using Attention Transfer (AT), Output Transfer (OT) and/or Adversarial Game (AG):
 #        ResNet-56/CIFAR-100    ResNet-18/ImageNet

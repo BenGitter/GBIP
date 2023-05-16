@@ -41,7 +41,8 @@ def test(data,
          trace=False,
          is_coco=False,
          v5_metric=False,
-         opt=None):
+         opt=None,
+         coco_only_person=False):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -273,6 +274,8 @@ def test(data,
             eval = COCOeval(anno, pred, 'bbox')
             if is_coco:
                 eval.params.imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]  # image IDs to evaluate
+            if coco_only_person:
+                eval.params.catIds = [1]
             eval.evaluate()
             eval.accumulate()
             eval.summarize()

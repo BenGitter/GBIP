@@ -8,7 +8,7 @@ from utils_yolo.general import fitness
 from utils_yolo.test import test
 from utils_yolo.load import load_data
 
-ckpt = './tmp/training9/weights/best.pth'
+ckpt = './tmp/training44/weights/best.pth'
 data = './data/coco.yaml'
 hyp = './data/hyp.scratch.tiny.yaml'
 
@@ -34,7 +34,7 @@ if __name__ == '__main__':
     img_size = [640, 640]
     imgsz_test, dataloader, dataset, testloader, hyp, model = load_data(model, img_size, data_dict, batch_size, hyp, num_workers, device)
 
-    results = test(
+    results, maps = test(
         data_dict,
         batch_size=batch_size * 2,
         imgsz=imgsz_test,
@@ -44,5 +44,18 @@ if __name__ == '__main__':
         is_coco=True,
         plots=False,
         iou_thres=0.65
-    )[0]
+    )[0:2]
     print('Fitness:', fitness(np.array(results).reshape(1, -1)))
+    print('Person mAP:', maps[0])
+    results = test(
+        data_dict,
+        batch_size=batch_size * 2,
+        imgsz=imgsz_test,
+        model=model,
+        dataloader=testloader,
+        save_json=True,
+        is_coco=True,
+        plots=False,
+        iou_thres=0.65,
+        coco_only_person=True
+    )[0]
