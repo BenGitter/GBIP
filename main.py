@@ -12,14 +12,20 @@ from utils_yolo.load import load_model, load_gbip_model, load_data, create_optim
 from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
 from utils_yolo.test import test
 from utils_yolo.loss2 import ComputeLossOTA
-from utils_gbip.prune import prune_step
+from utils_gbip.prune import prune_step, get_removed_channels
 
 # params
-N = 2 # 30
+N = 3 # 30
 sp = 10 # 10
-k = 0.2 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.5 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-batch_size = 16
+AT = True
+OT = True
+AG = False
+
+att_layers = [37, 40, 50] # NOTE: Variable not yet used, list is hardcoded in yolo.py Model::forward_with_attention()
+
+batch_size = 8
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
@@ -40,6 +46,7 @@ best = wdir / 'best.pth'
 results_file = save_dir / 'results.txt'
 
 if __name__ == "__main__":
+    print('AT={}, OT={}, AG={}'.format(AT, OT, AG))
     # create dirs
     os.makedirs(wdir, exist_ok=True)
     init_seeds(1)
@@ -70,7 +77,7 @@ if __name__ == "__main__":
 
     # optimizer + scaler + loss
     optimizer, scheduler = create_optimizer(model_S, hyp)
-    compute_loss = ComputeLossOTA(model_S, model_T=model_T)
+    compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT)
 
     best_fitness = 0
     for epoch in range(N):
@@ -87,11 +94,15 @@ if __name__ == "__main__":
             optimizer, scheduler = create_optimizer(model_S, hyp)
             del data_iter, batch
         
-        mloss = torch.zeros(7, device=device)
+        # get AT removed channels
+        if AT:
+            att_removed_c = get_removed_channels(model_S, att_layers)
+
+        mloss = torch.zeros(8, device=device)
         optimizer.zero_grad()
         ix = 0
         model_S.train()
-        print(('%10s' * 10) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'total', 'labels'))
+        print(('%8s' * 10) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'total'))
         pbar = tqdm(enumerate(dataloader), total=nb)
         for i, (imgs, targets, paths, _) in pbar:
             ni = i + nb * epoch +1
@@ -103,8 +114,12 @@ if __name__ == "__main__":
 
             # update model_S (while keeping model_G fixed)
             # forward pass
-            pred = model_S(imgs)
-            loss, loss_items = compute_loss(pred, targets, imgs)
+            if AT:
+                pred, att = model_S(imgs, AT=AT)
+                loss, loss_items = compute_loss(pred, targets, imgs, att, att_removed_c)
+            else:
+                pred = model_S(imgs)
+                loss, loss_items = compute_loss(pred, targets, imgs)
 
             # backprop
             loss.backward()
@@ -120,11 +135,11 @@ if __name__ == "__main__":
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-            s = ('%10s' * 2 + '%10.4g' * 8) % (
-                '%g/%g' % (epoch, N - 1), mem, *mloss, targets.shape[0])
+            s = ('%8s' * 2 + '%8.4g' * 8) % (
+                '%g/%g' % (epoch, N - 1), mem, *mloss)
             pbar.set_description(s)
 
-            if ix == 10:
+            if ix == 20:
                 break
 
         # end batch
@@ -146,20 +161,20 @@ if __name__ == "__main__":
         fi = fitness(np.array(results).reshape(1, -1))
         if fi > best_fitness:
             best_fitness = fi
-            print('Found higher fitness:', best_fitness)
-        else:
-            print('Fitness not higher:', fi)
-
-        # save last + best
-        torch.save({
-            'state_dict': model_S.state_dict(),
-            'struct': model_S.yaml
-        }, last)
-        if best_fitness == fi:
+            # save best
             torch.save({
                 'state_dict': model_S.state_dict(),
                 'struct': model_S.yaml
             }, best)
+            print('Found higher fitness:', best_fitness)
+        else:
+            print('Fitness not higher:', fi)
+        # save last
+        torch.save({
+            'state_dict': model_S.state_dict(),
+            'struct': model_S.yaml
+        }, last)
+
     # end epoch
 
     # test best.pth

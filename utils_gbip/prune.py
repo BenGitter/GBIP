@@ -3,16 +3,24 @@ from torch.nn import Upsample
 from models.common import Conv, Concat, MP, SP
 from models.yolo import Detect
 
+# Based on: https://github.com/tyui592/Pruning_filters_for_efficient_convnets/blob/master/prune.py
+
+def get_removed_channels(model, layers):
+    c = []
+    for i in layers:
+        c.append(model.model[i].remove_hist)
+    return c
+
 def index_remove(tensor, dim, index, removed=False):
-    if tensor.is_cuda:
-        tensor = tensor.cpu()
+    # if tensor.is_cuda:
+    #     tensor = tensor.cpu()
     size_ = list(tensor.size())
     new_size = tensor.size(dim) - len(index)
     size_[dim] = new_size
     new_size = size_
 
-    select_index = list(set(range(tensor.size(dim))) - set(index))
-    new_tensor = torch.index_select(tensor, dim, torch.tensor(select_index))
+    select_index = torch.tensor(list(set(range(tensor.size(dim))) - set(index))).cuda()
+    new_tensor = torch.index_select(tensor, dim, select_index)
     
     if removed:
         return new_tensor, torch.index_select(tensor, dim, torch.tensor(index))
@@ -155,6 +163,10 @@ def prune_step(model, img_batch, k, device, verbose=False):
         l.bn = get_new_norm(l.bn, l.cout_remove)
         l.cout_removed = l.cout_remove
         del l.cout_remove
+
+        if not hasattr(l, 'remove_hist'):
+            l.remove_hist = []
+        l.remove_hist.append(l.cout_removed)
 
         # update yaml
         if l.i < len(model.yaml['backbone']):

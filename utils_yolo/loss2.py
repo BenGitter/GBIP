@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from utils_yolo.general import bbox_iou, box_iou, xywh2xyxy
 from utils_yolo.torch_utils import is_parallel
-
+from utils_gbip.prune import index_remove
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
@@ -52,7 +52,7 @@ class ComputeLossGBIP:
 
 class ComputeLossOTA:
     # Compute losses
-    def __init__(self, model, tl=True, tl_alpha=0.3, tl_temp=1, model_T=None):
+    def __init__(self, model, OT=True, OT_alpha=0.3, OT_temp=1, AT=True, model_T=None):
         super(ComputeLossOTA, self).__init__()
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
@@ -60,8 +60,8 @@ class ComputeLossOTA:
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
-        KLDcls_tl = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: classification
-        KLDobj_tl = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: objectness
+        KLDcls_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: classification
+        KLDobj_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: objectness
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
@@ -69,20 +69,37 @@ class ComputeLossOTA:
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
         self.ssi =  0
-        self.BCEcls, self.BCEobj, self.KLDcls_tl, self.KLDobj_tl, self.gr, self.hyp, self.model_T, self.tl, self.tl_alpha, self.tl_temp = BCEcls, BCEobj, KLDcls_tl, KLDobj_tl, model.gr, h, model_T, tl, tl_alpha, tl_temp
+        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.KLDobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.OT_alpha, self.OT_temp, self.AT = BCEcls, BCEobj, KLDcls_OT, KLDobj_OT, model.gr, h, model_T, OT, OT_alpha, OT_temp, AT
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, p, targets, imgs):  # predictions, targets, model   
+    def __call__(self, p, targets, imgs, att=None, att_removed_c=None):  # predictions, targets, images, attention maps, attention layer channels   
         device = targets.device
-        lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+        lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj, lat = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
         bs, as_, gjs, gis, targets, anchors = self.build_targets(p, targets, imgs)
         pre_gen_gains = [torch.tensor(pp.shape, device=device)[[3, 2, 3, 2]] for pp in p] 
 
-        # Transfer Learning: Run teacher model with same inputs
-        if self.tl:
-            with torch.no_grad():
-                pred_T = self.model_T(imgs)[1]
+        # Run Teacher model with same inputs if AT and/or OT is enabled
+        with torch.no_grad():
+            if self.AT:
+                assert att is not None  # make sure student attention maps are included
+                pred_T, att_T = self.model_T(imgs, AT=True)
+            else:
+                if self.OT:
+                    pred_T = self.model_T(imgs)[1]
+
+        if self.AT:
+            for j, map_S in enumerate(att):
+                map_T = att_T[j]
+                for remove_c in att_removed_c[j]:
+                    map_T = index_remove(map_T, 1, remove_c)
+
+                assert map_S.shape == map_T.shape, '{} should match {}'.format(map_S.shape, map_T.shape)
+
+                # Calculate loss for this map
+                A_S = map_S.pow(2).mean(1).view(-1)
+                A_T = map_T.pow(2).mean(1).view(-1)
+                lat += torch.norm((A_S / A_S.norm(2)) - (A_T / A_T.norm(2)), 2)
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
@@ -105,12 +122,13 @@ class ComputeLossOTA:
                 lbox += (1.0 - iou).mean()  # iou loss
 
                 # Transfer Learning
-                ps_T = pred_T[i][b, a, gj, gi]
-                pxy_T = ps_T[:, :2].sigmoid() * 2. - 0.5
-                pwh_T = (ps_T[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
-                pbox_T = torch.cat((pxy_T, pwh_T), 1)
-                iou_TL = bbox_iou(pbox.T, pbox_T, x1y1x2y2=False, CIoU=True)
-                lbox_tl += (1.0 - iou_TL).mean()
+                if self.OT:
+                    ps_T = pred_T[i][b, a, gj, gi]
+                    pxy_T = ps_T[:, :2].sigmoid() * 2. - 0.5
+                    pwh_T = (ps_T[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
+                    pbox_T = torch.cat((pxy_T, pwh_T), 1)
+                    iou_TL = bbox_iou(pbox.T, pbox_T, x1y1x2y2=False, CIoU=True)
+                    lbox_tl += (1.0 - iou_TL).mean()
 
                 # Objectness
                 tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
@@ -127,13 +145,13 @@ class ComputeLossOTA:
                 #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
             # Transfer Learning: KL divergence classification
-            if self.tl:
-                kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.tl_temp, dim=1)
-                kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.tl_temp, dim=1)
-                lkl_cls += self.tl_temp**2 * self.KLDcls_tl(kl_cls_input, kl_cls_target)
+            if self.OT:
+                kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.OT_temp, dim=1)
+                kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.OT_temp, dim=1)
+                lkl_cls += self.OT_temp**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
                 kl_obj_input = F.logsigmoid(pi[:,:,:,:,4].view(-1, 1))
                 kl_obj_target = F.logsigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
-                lkl_obj += self.KLDobj_tl(kl_obj_input, kl_obj_target)
+                lkl_obj += self.KLDobj_OT(kl_obj_input, kl_obj_target)
             obji = self.BCEobj(pi[..., 4], tobj)
             lobj += obji * self.balance[i]  # obj loss
 
@@ -147,10 +165,12 @@ class ComputeLossOTA:
         bs = tobj.shape[0]  # batch size
 
         loss = lbox + lobj + lcls
-        if self.tl:
-            loss = self.tl_alpha * (lkl_cls + lbox_tl + lkl_obj) + (1 - self.tl_alpha) * loss
-        
-        return loss * bs, torch.cat((lbox, lobj, lcls, lbox_tl, lkl_cls, lkl_obj, loss)).detach()
+        if self.OT:
+            loss = self.OT_alpha * (lkl_cls + lbox_tl + lkl_obj) + (1 - self.OT_alpha) * loss
+        if self.AT:
+            loss += lat
+
+        return loss * bs, torch.cat((lbox, lobj, lcls, lbox_tl, lkl_cls, lkl_obj, lat, loss)).detach()
 
     def build_targets(self, p, targets, imgs):
         device = targets.device

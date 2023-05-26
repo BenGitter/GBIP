@@ -578,8 +578,10 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False):
-        if augment:
+    def forward(self, x, augment=False, profile=False, AT=False):
+        if AT:
+            return self.forward_with_attention(x)
+        elif augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
             f = [None, 3, None]  # flips (2-ud, 3-lr)
@@ -598,6 +600,20 @@ class Model(nn.Module):
         else:
             return self.forward_once(x, profile)  # single-scale inference, train
 
+    def forward_with_attention(self, x):
+        y, att = [], []  # outputs
+        for m in self.model:
+            if m.f != -1:  # if not from previous layer
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+
+            x = m(x)  # run
+            
+            y.append(x if m.i in self.save else None)  # save output
+            if m.i in [37, 40, 50]: att.append(x)
+        if len(x) == 2:
+            return x[1], att
+        return x, att
+    
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
         for m in self.model:
