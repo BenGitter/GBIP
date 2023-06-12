@@ -7,55 +7,22 @@ import torch.nn.functional as F
 from utils_yolo.general import bbox_iou, box_iou, xywh2xyxy
 from utils_yolo.torch_utils import is_parallel
 from utils_gbip.prune import index_remove
+from utils_gbip.adversarial import AdversarialGame, AdversarialGame2
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
     return 1.0 - 0.5 * eps, 0.5 * eps
 
 
-class ComputeLossGBIP:
-    # create ComputeLossOTA instance, add additional logic.
-    def __init__(self, model, tf=True, tf_alpha=0.3, tf_temp=1):
-        self.tf = tf                # transfer learning
-        self.tf_alpha = tf_alpha    # transfer learning weight
-        self.tf_temp = tf_temp      # transfer learning label smoothing temperature
-        self.compute_loss_ota = ComputeLossOTA(model)
-        self.kl_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
-    
-    def __call__(self, p, targets, imgs, model_T=None):
-        # get normal YOLO losses
-        bs = imgs.shape[0]
-        loss, loss_items = self.compute_loss_ota(p, targets, imgs, model_T)
-        lbox, lobj, lcls, _ = torch.split(loss_items, 1)
-
-        # Transfer learning
-        lkl = torch.zeros(1)
-        if self.tf:
-            lkl = self.calculate_kl_loss(p, imgs, model_T)
-            # add to loss
-            loss = self.tf_alpha * (lkl * bs) + (1 - self.tf_alpha) * loss
-
-        return loss, torch.cat((lbox, lobj, lcls, lkl, loss/bs)).detach()
-
-    def calculate_kl_loss(self, p, imgs, model_T):
-        T = 5
-        with torch.no_grad():
-            pred_T = model_T(imgs)[1]
-        
-        kl_losses = torch.zeros(3).cuda()
-        for i in range(3):
-            kl_input = F.log_softmax(p[i][:,:,:,:,4:] / self.tf_temp, dim=4)
-            kl_target = F.log_softmax(pred_T[i][:,:,:,:,4:] / self.tf_temp, dim=4)
-            kl_losses[i] = self.tf_temp**2 * self.kl_loss(kl_input, kl_target) / torch.numel(p[0][:,:,:,:,0])
-        return torch.sum(kl_losses, dim=0, keepdim=True)
-
-
 class ComputeLossOTA:
     # Compute losses
-    def __init__(self, model, OT=True, OT_alpha=0.3, OT_temp=1, AT=True, model_T=None):
+    def __init__(self, model, OT=True, AT=True, AG=True, model_T=None):
         super(ComputeLossOTA, self).__init__()
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
+
+        if AG:
+            self.adversarial_game = AdversarialGame2(device)
 
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
@@ -69,13 +36,15 @@ class ComputeLossOTA:
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
         self.ssi =  0
-        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.KLDobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.OT_alpha, self.OT_temp, self.AT = BCEcls, BCEobj, KLDcls_OT, KLDobj_OT, model.gr, h, model_T, OT, OT_alpha, OT_temp, AT
+        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.KLDobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.AT, self.AG = \
+            BCEcls, BCEobj, KLDcls_OT, KLDobj_OT, model.gr, h, model_T, OT, AT, AG
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 
     def __call__(self, p, targets, imgs, att=None, att_removed_c=None):  # predictions, targets, images, attention maps, attention layer channels   
         device = targets.device
-        lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj, lat = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+        l = torch.zeros(9, device=device)
+        lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj, lat, lag, lmg = range(9)
         bs, as_, gjs, gis, targets, anchors = self.build_targets(p, targets, imgs)
         pre_gen_gains = [torch.tensor(pp.shape, device=device)[[3, 2, 3, 2]] for pp in p] 
 
@@ -85,21 +54,21 @@ class ComputeLossOTA:
                 assert att is not None  # make sure student attention maps are included
                 pred_T, att_T = self.model_T(imgs, AT=True)
             else:
-                if self.OT:
+                if self.OT or self.AG:
                     pred_T = self.model_T(imgs)[1]
 
         if self.AT:
             for j, map_S in enumerate(att):
                 map_T = att_T[j]
-                for remove_c in att_removed_c[j]:
-                    map_T = index_remove(map_T, 1, remove_c)
+                # for remove_c in att_removed_c[j]:
+                #     map_T = index_remove(map_T, 1, remove_c)
 
-                assert map_S.shape == map_T.shape, '{} should match {}'.format(map_S.shape, map_T.shape)
+                # assert map_S.shape == map_T.shape, '{} should match {}'.format(map_S.shape, map_T.shape)
 
                 # Calculate loss for this map
                 A_S = map_S.pow(2).mean(1).view(-1)
                 A_T = map_T.pow(2).mean(1).view(-1)
-                lat += torch.norm((A_S / A_S.norm(2)) - (A_T / A_T.norm(2)), 2)
+                l[lat] += torch.norm((A_S / A_S.norm(2)) - (A_T / A_T.norm(2)), 2)
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
@@ -119,7 +88,7 @@ class ComputeLossOTA:
                 selected_tbox = targets[i][:, 2:6] * pre_gen_gains[i]
                 selected_tbox[:, :2] -= grid
                 iou = bbox_iou(pbox.T, selected_tbox, x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
-                lbox += (1.0 - iou).mean()  # iou loss
+                l[lbox] += (1.0 - iou).mean()  # iou loss
 
                 # Transfer Learning
                 if self.OT:
@@ -128,7 +97,10 @@ class ComputeLossOTA:
                     pwh_T = (ps_T[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
                     pbox_T = torch.cat((pxy_T, pwh_T), 1)
                     iou_TL = bbox_iou(pbox.T, pbox_T, x1y1x2y2=False, CIoU=True)
-                    lbox_tl += (1.0 - iou_TL).mean()
+                    l[lbox_tl] += (1.0 - iou_TL).mean()
+
+                # AG
+
 
                 # Objectness
                 tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
@@ -138,39 +110,53 @@ class ComputeLossOTA:
                 if self.nc > 1:  # cls loss (only if multiple classes)
                     t = torch.full_like(ps[:, 5:], self.cn, device=device)  # targets
                     t[range(n), selected_tcls] = self.cp
-                    lcls += self.BCEcls(ps[:, 5:], t)  # BCE
+                    l[lcls] += self.BCEcls(ps[:, 5:], t)  # BCE
 
-                # Append targets to text file
-                # with open('targets.txt', 'a') as file:
-                #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
+                # Transfer Learning: KL divergence classification
+                if self.OT:
+                    kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
+                    kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
+                    l[lkl_cls] += self.hyp['OT_temp']**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
+                    kl_obj_input = F.logsigmoid(pi[:,:,:,:,4].view(-1, 1))
+                    kl_obj_target = F.logsigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
+                    l[lkl_obj] += self.KLDobj_OT(kl_obj_input, kl_obj_target)
 
-            # Transfer Learning: KL divergence classification
-            if self.OT:
-                kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.OT_temp, dim=1)
-                kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.OT_temp, dim=1)
-                lkl_cls += self.OT_temp**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
-                kl_obj_input = F.logsigmoid(pi[:,:,:,:,4].view(-1, 1))
-                kl_obj_target = F.logsigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
-                lkl_obj += self.KLDobj_OT(kl_obj_input, kl_obj_target)
             obji = self.BCEobj(pi[..., 4], tobj)
-            lobj += obji * self.balance[i]  # obj loss
+            l[lobj] += obji * self.balance[i]  # obj loss
 
+        # Test AG
+        if self.AG:
+            # if not self.OT:
+            #     ps_T = pred_T[i][b, a, gj, gi]
+            # pass
+            # self.adversarial_game.run(ps, ps_T)
+            bs, na, nx, ny, no = p[2].shape
+            p2_T = pred_T[2].permute(0,1,4,2,3).reshape(bs, na*no, nx, ny)
+            p2_S = p[2].permute(0,1,4,2,3).reshape(bs, na*no, nx, ny)
+            l[lag] = self.adversarial_game.run(p2_S, p2_T)
 
-        lbox *= self.hyp['box']
-        lobj *= self.hyp['obj']
-        lcls *= self.hyp['cls']
-        lbox_tl *= self.hyp['box']
-        lkl_obj *= self.hyp['obj']
-        lkl_cls *= self.hyp['cls']
+        l[lbox] *= self.hyp['box']
+        l[lobj] *= self.hyp['obj']
+        l[lcls] *= self.hyp['cls']
+        l[lbox_tl] *= self.hyp['box']
+        l[lkl_obj] *= self.hyp['obj']
+        l[lkl_cls] *= self.hyp['cls'] * self.hyp['lkl_cls']
+        l[lag] *= self.hyp['lag']
+        l[lat] *= self.hyp['lat']
         bs = tobj.shape[0]  # batch size
 
-        loss = lbox + lobj + lcls
+        loss = l[lbox] + l[lobj] + l[lcls]
         if self.OT:
-            loss = self.OT_alpha * (lkl_cls + lbox_tl + lkl_obj) + (1 - self.OT_alpha) * loss
+            loss = self.hyp['OT_alpha'] * (l[lkl_cls] + l[lbox_tl] + l[lkl_obj]) + (1 - self.hyp['OT_alpha']) * loss
         if self.AT:
-            loss += lat
+            loss += l[lat]
+        if self.AG:
+            loss += l[lag]
+            l[lmg] = self.adversarial_game.get_loss_sum()
+            # self.adversarial_game.update()
 
-        return loss * bs, torch.cat((lbox, lobj, lcls, lbox_tl, lkl_cls, lkl_obj, lat, loss)).detach()
+        return loss * bs, torch.cat((l[:lag+1], loss.unsqueeze(0), l[lmg].unsqueeze(0))).detach()
+        # return loss * bs, torch.cat((lbox, lobj, lcls, lbox_tl, lkl_cls, lkl_obj, lat, lag, loss, lmg)).detach()
 
     def build_targets(self, p, targets, imgs):
         device = targets.device

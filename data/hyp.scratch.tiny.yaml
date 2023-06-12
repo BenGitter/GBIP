@@ -1,5 +1,4 @@
-lr0: 0.001  # initial learning rate (SGD=1E-2, Adam=1E-3)
-lrf: 0.01  # final OneCycleLR learning rate (lr0 * lrf)
+# original
 momentum: 0.937  # SGD momentum/Adam beta1
 weight_decay: 0.0005  # optimizer weight decay 5e-4
 warmup_epochs: 3.0  # warmup epochs (fractions ok)
@@ -29,3 +28,14 @@ mixup: 0.05  # image mixup (probability)
 copy_paste: 0.0  # image copy paste (probability)
 paste_in: 0.05  # image copy paste (probability), use 0 for faster training
 loss_ota: 0 # use ComputeLossOTA, use 0 for faster training
+
+# changed/added
+lr0: 0.0001  # initial learning rate (SGD=1E-2, Adam=1E-3)
+# lr_gamma: 0.6519 # learning rate exponential decay
+lrf: 0.1  # final OneCycleLR learning rate (lr0 * lrf)
+# loss gains
+lag: 0.05  # adversarial game 
+lat: 1.0 # attention map
+lkl_cls: 0.1 # output transfer cls
+OT_temp: 2
+OT_alpha: 0.3

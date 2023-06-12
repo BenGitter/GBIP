@@ -2,6 +2,7 @@ import os
 os.environ["OMP_NUM_THREADS"] = '1'
 
 import torch
+import torch.optim as optim
 
 import yaml
 import numpy as np
@@ -14,25 +15,23 @@ from utils_yolo.test import test
 from utils_yolo.loss2 import ComputeLossOTA
 from utils_gbip.prune import prune_step, get_removed_channels
 
+
 # params
-N = 3 # 30
+N = 5 # 30
 sp = 10 # 10
-k = 0.5 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.8 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = True
-OT = True
-AG = False
+AT = False
+OT = False
+AG = True
 
-att_layers = [37, 40, 50] # NOTE: Variable not yet used, list is hardcoded in yolo.py Model::forward_with_attention()
+att_layers = [37, 40, 50] # NOTE: list is also hardcoded in yolo.py Model::forward_with_attention()
 
 batch_size = 8
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
 img_size = [640, 640]
-
-lr = 5e-3
-lr_gamma = 1
 
 data = './data/coco.yaml'
 hyp = './data/hyp.scratch.tiny.yaml'
@@ -54,8 +53,6 @@ if __name__ == "__main__":
     # open data info
     with open(hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)
-        hyp['lr0'] = lr
-        hyp['lr_gamma'] = lr_gamma
     with open(data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)
     with open(struct_file) as f:
@@ -66,20 +63,22 @@ if __name__ == "__main__":
     nc = int(data_dict['nc'])
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     cuda = device.type != 'cpu'
+
     model_T = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device).eval() # teacher model
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
-    # model_G = # adversarial model
 
     # load train+val datasets
-    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
-    imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device)
+    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
     nb = len(dataloader)        # number of batches
 
     # optimizer + scaler + loss
     optimizer, scheduler = create_optimizer(model_S, hyp)
-    compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT)
+    compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT, AG=AG)
 
+    r_file = open(results_file, 'w')
     best_fitness = 0
+    x, y = [], []
     for epoch in range(N):
         # prune student model every sp epochs
         if epoch % sp == 0:
@@ -98,21 +97,17 @@ if __name__ == "__main__":
         if AT:
             att_removed_c = get_removed_channels(model_S, att_layers)
 
-        mloss = torch.zeros(8, device=device)
+        mloss = torch.zeros(10, device=device)
         optimizer.zero_grad()
         ix = 0
         model_S.train()
-        print(('%8s' * 10) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'total'))
+        print(('%8s' * 12) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
         pbar = tqdm(enumerate(dataloader), total=nb)
         for i, (imgs, targets, paths, _) in pbar:
             ni = i + nb * epoch +1
             imgs = imgs.to(device, non_blocking=True).float() / 255.0
-            targets = targets.to(device)
+            targets = targets.to(device)            
 
-            # update model_G (while keeping model_S fixed)
-            
-
-            # update model_S (while keeping model_G fixed)
             # forward pass
             if AT:
                 pred, att = model_S(imgs, AT=AT)
@@ -122,7 +117,12 @@ if __name__ == "__main__":
                 loss, loss_items = compute_loss(pred, targets, imgs)
 
             # backprop
-            loss.backward()
+            if AG:
+                loss.backward(retain_graph=True)
+                compute_loss.adversarial_game.update()
+            else:
+                loss.backward()
+            
 
             # optimize
             if ni % accumulate == 0:
@@ -130,20 +130,29 @@ if __name__ == "__main__":
                 optimizer.step()
                 optimizer.zero_grad()
             
-             # print
+            # print
             rate = pbar.format_dict['rate']
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-            s = ('%8s' * 2 + '%8.4g' * 8) % (
+            s = ('%8s' * 2 + '%8.4g' * 10) % (
                 '%g/%g' % (epoch, N - 1), mem, *mloss)
             pbar.set_description(s)
 
-            if ix == 20:
+            # save losses each nominal batch
+            if ni % accumulate == 0:
+                s = ('%10s' * 2 + '%10.4g' * 10 + '\n') % (
+                '%g/%g' % (epoch, N - 1), mem, *loss_items)
+                r_file.write(s)
+
+            if ix == 200:
                 break
 
         # end batch
+        x.append(epoch)
+        y.append(optimizer.param_groups[0]["lr"])
         scheduler.step()
+        print('New learning rate:', optimizer.param_groups[0]["lr"])
 
         # run validation at end of each epoch
         results, maps = test(
@@ -177,6 +186,12 @@ if __name__ == "__main__":
 
     # end epoch
 
+    r_file.close()
+
+    import matplotlib.pyplot as plt
+    plt.plot(x,y)
+    plt.show()
+
     # test best.pth
     results, _, _, stats = test(
         data_dict,
@@ -202,6 +217,6 @@ if __name__ == "__main__":
 
 # TODO:
 # [X] Implement pruning step
-# [-] Implement Teacher + Student training (most effective)
-# [-] Try Attention Transfer (minor effect, but should be relatively easy)
+# [X] Implement Teacher + Student training (most effective)
+# [X] Try Attention Transfer (minor effect, but should be relatively easy)
 # [-] Try Adversarial Game (larger effect, but probably harder)
