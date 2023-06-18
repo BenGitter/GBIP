@@ -15,17 +15,14 @@ from utils_yolo.test import test
 from utils_yolo.loss2 import ComputeLossOTA
 from utils_gbip.prune import prune_step, get_removed_channels
 
-
 # params
 N = 5 # 30
 sp = 10 # 10
-k = 0.8 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.7 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
 OT = False
 AG = True
-
-att_layers = [37, 40, 50] # NOTE: list is also hardcoded in yolo.py Model::forward_with_attention()
 
 batch_size = 8
 nbs = 64 # nominal batch size
@@ -68,7 +65,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
     nb = len(dataloader)        # number of batches
 
@@ -93,10 +90,6 @@ if __name__ == "__main__":
             optimizer, scheduler = create_optimizer(model_S, hyp)
             del data_iter, batch
         
-        # get AT removed channels
-        if AT:
-            att_removed_c = get_removed_channels(model_S, att_layers)
-
         mloss = torch.zeros(10, device=device)
         optimizer.zero_grad()
         ix = 0
@@ -111,29 +104,31 @@ if __name__ == "__main__":
             # forward pass
             if AT:
                 pred, att = model_S(imgs, AT=AT)
-                loss, loss_items = compute_loss(pred, targets, imgs, att, att_removed_c)
+                loss, loss_items = compute_loss(pred, targets, imgs, att)
             else:
                 pred = model_S(imgs)
                 loss, loss_items = compute_loss(pred, targets, imgs)
 
             # backprop
-            if AG:
-                loss.backward(retain_graph=True)
-                compute_loss.adversarial_game.update()
-            else:
-                loss.backward()
-            
+            loss.backward()  
 
             # optimize
             if ni % accumulate == 0:
                 ix+=1
                 optimizer.step()
                 optimizer.zero_grad()
-            
+
+                # update adversarial model
+                if AG:
+                    loss_items[9] = compute_loss.update_AG(imgs, pred)
+            elif AG:
+                loss_items[9] = mloss[9]
+            # loss_items[7] /= hyp['lag']
             # print
             rate = pbar.format_dict['rate']
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
-            mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+            # mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+            mloss = (mloss * 9 + loss_items) / 10  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
             s = ('%8s' * 2 + '%8.4g' * 10) % (
                 '%g/%g' % (epoch, N - 1), mem, *mloss)

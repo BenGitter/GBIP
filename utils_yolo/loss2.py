@@ -22,7 +22,7 @@ class ComputeLossOTA:
         h = model.hyp  # hyperparameters
 
         if AG:
-            self.adversarial_game = AdversarialGame2(device)
+            self.adversarial_game = AdversarialGame(device)
 
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
@@ -41,7 +41,7 @@ class ComputeLossOTA:
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, p, targets, imgs, att=None, att_removed_c=None):  # predictions, targets, images, attention maps, attention layer channels   
+    def __call__(self, p, targets, imgs, att=None):  # predictions, targets, images, attention maps
         device = targets.device
         l = torch.zeros(9, device=device)
         lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj, lat, lag, lmg = range(9)
@@ -60,10 +60,6 @@ class ComputeLossOTA:
         if self.AT:
             for j, map_S in enumerate(att):
                 map_T = att_T[j]
-                # for remove_c in att_removed_c[j]:
-                #     map_T = index_remove(map_T, 1, remove_c)
-
-                # assert map_S.shape == map_T.shape, '{} should match {}'.format(map_S.shape, map_T.shape)
 
                 # Calculate loss for this map
                 A_S = map_S.pow(2).mean(1).view(-1)
@@ -99,9 +95,6 @@ class ComputeLossOTA:
                     iou_TL = bbox_iou(pbox.T, pbox_T, x1y1x2y2=False, CIoU=True)
                     l[lbox_tl] += (1.0 - iou_TL).mean()
 
-                # AG
-
-
                 # Objectness
                 tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
 
@@ -124,16 +117,10 @@ class ComputeLossOTA:
             obji = self.BCEobj(pi[..., 4], tobj)
             l[lobj] += obji * self.balance[i]  # obj loss
 
-        # Test AG
-        if self.AG:
-            # if not self.OT:
-            #     ps_T = pred_T[i][b, a, gj, gi]
-            # pass
-            # self.adversarial_game.run(ps, ps_T)
-            bs, na, nx, ny, no = p[2].shape
-            p2_T = pred_T[2].permute(0,1,4,2,3).reshape(bs, na*no, nx, ny)
-            p2_S = p[2].permute(0,1,4,2,3).reshape(bs, na*no, nx, ny)
-            l[lag] = self.adversarial_game.run(p2_S, p2_T)
+            if self.AG:
+                no = pi.shape[4]
+                in_S = pi.reshape(-1, no)
+                l[lag] += 1/3 * self.adversarial_game.get_student_loss(in_S)
 
         l[lbox] *= self.hyp['box']
         l[lobj] *= self.hyp['obj']
@@ -152,11 +139,22 @@ class ComputeLossOTA:
             loss += l[lat]
         if self.AG:
             loss += l[lag]
-            l[lmg] = self.adversarial_game.get_loss_sum()
-            # self.adversarial_game.update()
 
         return loss * bs, torch.cat((l[:lag+1], loss.unsqueeze(0), l[lmg].unsqueeze(0))).detach()
-        # return loss * bs, torch.cat((lbox, lobj, lcls, lbox_tl, lkl_cls, lkl_obj, lat, lag, loss, lmg)).detach()
+
+    def update_AG(self, imgs, pred_S):
+        with torch.no_grad():
+            pred_T = self.model_T(imgs)[1]
+
+        loss_sum = torch.zeros(1).cuda()
+        for i in range(3):
+            no = pred_S[i].shape[4]
+            in_T = pred_T[i].reshape(-1, no)
+            in_S = pred_S[i].detach().clone()
+            in_S = in_S.reshape(-1, no)
+            loss_sum += self.adversarial_game.update(in_S, in_T)
+        
+        return loss_sum / 3    
 
     def build_targets(self, p, targets, imgs):
         device = targets.device
