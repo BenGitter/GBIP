@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from models.adversarial import AdversarialModel, AdversarialModel2
+from models.adversarial import AdversarialModel
 
 class AdversarialGame:
     def __init__(self, device):

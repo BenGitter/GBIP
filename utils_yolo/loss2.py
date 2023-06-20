@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from utils_yolo.general import bbox_iou, box_iou, xywh2xyxy
 from utils_yolo.torch_utils import is_parallel
 from utils_gbip.prune import index_remove
-from utils_gbip.adversarial import AdversarialGame, AdversarialGame2
+from utils_gbip.adversarial import AdversarialGame
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
