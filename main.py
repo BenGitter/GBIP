@@ -12,7 +12,7 @@ from pathlib import Path
 from utils_yolo.load import load_model, load_gbip_model, load_data, create_optimizer
 from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
 from utils_yolo.test import test
-from utils_yolo.loss2 import ComputeLossOTA
+from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step, get_removed_channels
 
 # params
