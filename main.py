@@ -2,7 +2,6 @@ import os
 os.environ["OMP_NUM_THREADS"] = '1'
 
 import torch
-import torch.optim as optim
 
 import yaml
 import numpy as np
@@ -13,16 +12,16 @@ from utils_yolo.load import load_model, load_gbip_model, load_data, create_optim
 from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
 from utils_yolo.test import test
 from utils_yolo.loss import ComputeLossOTA
-from utils_gbip.prune import prune_step, get_removed_channels
+from utils_gbip.prune import prune_step
 
 # params
 N = 5 # 30
 sp = 10 # 10
-k = 0.7 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.5 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = False
+AT = True
 OT = False
-AG = True
+AG = False
 
 batch_size = 8
 nbs = 64 # nominal batch size
@@ -50,6 +49,7 @@ if __name__ == "__main__":
     # open data info
     with open(hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)
+        print(hyp['attention_layers'])
     with open(data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)
     with open(struct_file) as f:
@@ -103,7 +103,7 @@ if __name__ == "__main__":
 
             # forward pass
             if AT:
-                pred, att = model_S(imgs, AT=AT)
+                pred, att = model_S(imgs, AT=AT, attention_layers=hyp['attention_layers'])
                 loss, loss_items = compute_loss(pred, targets, imgs, att)
             else:
                 pred = model_S(imgs)

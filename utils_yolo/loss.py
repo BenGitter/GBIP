@@ -51,7 +51,7 @@ class ComputeLossOTA:
         with torch.no_grad():
             if self.AT:
                 assert att is not None  # make sure student attention maps are included
-                pred_T, att_T = self.model_T(imgs, AT=True)
+                pred_T, att_T = self.model_T(imgs, AT=True, attention_layers=self.hyp['attention_layers'])
             else:
                 if self.OT or self.AG:
                     pred_T = self.model_T(imgs)[1]
