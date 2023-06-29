@@ -19,8 +19,8 @@ N = 5 # 30
 sp = 10 # 10
 k = 0.5 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = True
-OT = False
+AT = False
+OT = True
 AG = False
 
 batch_size = 8
@@ -39,6 +39,7 @@ wdir = save_dir / 'weights'
 last = wdir / 'last.pth'
 best = wdir / 'best.pth'
 results_file = save_dir / 'results.txt'
+loss_file = save_dir / 'losses.txt'
 
 if __name__ == "__main__":
     print('AT={}, OT={}, AG={}'.format(AT, OT, AG))
@@ -65,7 +66,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
     nb = len(dataloader)        # number of batches
 
@@ -73,9 +74,8 @@ if __name__ == "__main__":
     optimizer, scheduler = create_optimizer(model_S, hyp)
     compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT, AG=AG)
 
-    r_file = open(results_file, 'w')
+    l_file = open(loss_file, 'w')
     best_fitness = 0
-    x, y = [], []
     for epoch in range(N):
         # prune student model every sp epochs
         if epoch % sp == 0:
@@ -138,16 +138,15 @@ if __name__ == "__main__":
             if ni % accumulate == 0:
                 s = ('%10s' * 2 + '%10.4g' * 10 + '\n') % (
                 '%g/%g' % (epoch, N - 1), mem, *loss_items)
-                r_file.write(s)
+                l_file.write(s)
 
-            if ix == 200:
+            if ix == 10:
                 break
 
         # end batch
-        x.append(epoch)
-        y.append(optimizer.param_groups[0]["lr"])
         scheduler.step()
-        print('New learning rate:', optimizer.param_groups[0]["lr"])
+        new_lr = optimizer.param_groups[0]["lr"]
+        print('New learning rate:', new_lr)
 
         # run validation at end of each epoch
         results, maps = test(
@@ -156,7 +155,7 @@ if __name__ == "__main__":
             imgsz=imgsz_test,
             model=model_S,
             dataloader=testloader,
-            # compute_loss=compute_loss,
+            compute_loss=compute_loss,
             is_coco=True,
             plots=False,
             iou_thres=0.65
@@ -179,9 +178,13 @@ if __name__ == "__main__":
             'struct': model_S.yaml
         }, last)
 
+        # write results to file
+        with open(results_file, 'a') as f:
+            f.write(('{}/{}' + '{:10.4g}'*15 + '{:10.2e}\n').format(epoch, N-1, *results, fi[0], new_lr)) # append metrics, val_loss
+
     # end epoch
 
-    r_file.close()
+    l_file.close()
 
     import matplotlib.pyplot as plt
     plt.plot(x,y)
