@@ -15,9 +15,9 @@ from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 5 # 30
+N = 2 # 30
 sp = 10 # 10
-k = 0.5 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.3 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
 OT = True
@@ -66,7 +66,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
     nb = len(dataloader)        # number of batches
 
@@ -186,10 +186,6 @@ if __name__ == "__main__":
 
     l_file.close()
 
-    import matplotlib.pyplot as plt
-    plt.plot(x,y)
-    plt.show()
-
     # test best.pth
     results, _, _, stats = test(
         data_dict,
@@ -217,4 +213,4 @@ if __name__ == "__main__":
 # [X] Implement pruning step
 # [X] Implement Teacher + Student training (most effective)
 # [X] Try Attention Transfer (minor effect, but should be relatively easy)
-# [-] Try Adversarial Game (larger effect, but probably harder)
+# [X] Try Adversarial Game (larger effect, but probably harder)

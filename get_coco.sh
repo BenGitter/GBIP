@@ -3,7 +3,7 @@
 # Download command: bash ./scripts/get_coco.sh
 
 # Download/unzip labels
-d='./' # unzip directory
+d='../' # unzip directory
 url=https://github.com/ultralytics/yolov5/releases/download/v1.0/
 f='coco2017labels.zip'
 echo 'Downloading' $url$f ' ...'
