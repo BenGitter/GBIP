@@ -39,4 +39,4 @@ lat: 0.1 # attention map
 lkl_cls: 0.1 # output transfer cls
 OT_temp: 2
 OT_alpha: 0.3
-attention_layers:  [37, 40, 50]
+attention_layers:  [7, 14, 21, 28, 47, 57, 65, 73]

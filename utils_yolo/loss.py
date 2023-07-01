@@ -47,16 +47,18 @@ class ComputeLossOTA:
         bs, as_, gjs, gis, targets, anchors = self.build_targets(p, targets, imgs)
         pre_gen_gains = [torch.tensor(pp.shape, device=device)[[3, 2, 3, 2]] for pp in p] 
 
+        # Create local AT variable; for validation att is None and so we don't run AT stuff.
+        AT = self.AT and att
         # Run Teacher model with same inputs if AT and/or OT is enabled
         with torch.no_grad():
-            if self.AT:
+            if AT:
                 assert att is not None  # make sure student attention maps are included
                 pred_T, att_T = self.model_T(imgs, AT=True, attention_layers=self.hyp['attention_layers'])
             else:
                 if self.OT or self.AG:
                     pred_T = self.model_T(imgs)[1]
 
-        if self.AT:
+        if AT:
             for j, map_S in enumerate(att):
                 map_T = att_T[j]
 
@@ -134,7 +136,7 @@ class ComputeLossOTA:
         loss = l[lbox] + l[lobj] + l[lcls]
         if self.OT:
             loss = self.hyp['OT_alpha'] * (l[lkl_cls] + l[lbox_tl] + l[lkl_obj]) + (1 - self.hyp['OT_alpha']) * loss
-        if self.AT:
+        if AT:
             loss += l[lat]
         if self.AG:
             loss += l[lag]
