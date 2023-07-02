@@ -15,12 +15,12 @@ from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 2 # 30
-sp = 10 # 10
+N = 6 # 30
+sp = 2 # 10
 k = 0.3 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
-OT = True
+OT = False
 AG = False
 
 batch_size = 8
@@ -66,7 +66,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
     nb = len(dataloader)        # number of batches
 
@@ -74,8 +74,14 @@ if __name__ == "__main__":
     optimizer, scheduler = create_optimizer(model_S, hyp)
     compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT, AG=AG)
 
+    # create losses and results file and write heading
     l_file = open(loss_file, 'w')
+    l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
+    with open(results_file, 'a') as r_file:
+            r_file.write(('{:>10s}'*18 + '\n').format('epoch', 'mp', 'mr', 'mAP50', 'mAP', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg', 'mAP[0]', 'fitness', 'new_lr'))
+            
     best_fitness = 0
+    pruning_cycle = 0
     for epoch in range(N):
         # prune student model every sp epochs
         if epoch % sp == 0:
@@ -89,6 +95,12 @@ if __name__ == "__main__":
             prune_step(model_S, batch, k, device)
             optimizer, scheduler = create_optimizer(model_S, hyp)
             del data_iter, batch
+
+            # update best_fitness + index
+            best_fitness = 0
+            pruning_cycle += 1
+            last = wdir / 'last{}.pth'.format(pruning_cycle)
+            best = wdir / 'best{}.pth'.format(pruning_cycle)
         
         mloss = torch.zeros(10, device=device)
         optimizer.zero_grad()
@@ -123,8 +135,7 @@ if __name__ == "__main__":
                     loss_items[9] = compute_loss.update_AG(imgs, pred)
             elif AG:
                 loss_items[9] = mloss[9]
-            # loss_items[7] /= hyp['lag']
-            # print
+
             rate = pbar.format_dict['rate']
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
             # mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
@@ -179,8 +190,8 @@ if __name__ == "__main__":
         }, last)
 
         # write results to file
-        with open(results_file, 'a') as f:
-            f.write(('{}/{}' + '{:10.4g}'*15 + '{:10.2e}\n').format(epoch, N-1, *results, fi[0], new_lr)) # append metrics, val_loss
+        with open(results_file, 'a') as r_file:
+            r_file.write(('{:7d}/{:2d}' + '{:10.4g}'*16 + '{:10.2e}\n').format(epoch, N-1, *results, maps[0], fi[0], new_lr)) # append metrics, val_loss
 
     # end epoch
 
