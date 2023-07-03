@@ -19,12 +19,12 @@ N = 30 # 30
 sp = 10 # 10
 k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = True
-OT = False
+AT = False
+OT = True
 AG = False
 
 augment = True
-batch_size = 8
+batch_size = 32
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
@@ -153,8 +153,8 @@ if __name__ == "__main__":
                 '%g/%g' % (epoch, N - 1), mem, *loss_items)
                 l_file.write(s)
 
-            if ix == 10:
-                break
+            # if ix == 10:
+            #     break
 
         # end batch
         scheduler.step()
