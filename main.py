@@ -15,11 +15,11 @@ from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 6 # 30
-sp = 2 # 10
-k = 0.3 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+N = 30 # 30
+sp = 10 # 10
+k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = False
+AT = True
 OT = False
 AG = False
 
@@ -78,6 +78,7 @@ if __name__ == "__main__":
     l_file = open(loss_file, 'w')
     l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
     with open(results_file, 'a') as r_file:
+            r_file.write(f"{k=}, {AT=}, {OT=}, {AG=}, {N=}, {sp=}, {batch_size=}, {hyp['lr0']=}, {hyp['lrf']=}, {hyp['attention_layers']=}\n")
             r_file.write(('{:>10s}'*18 + '\n').format('epoch', 'mp', 'mr', 'mAP50', 'mAP', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg', 'mAP[0]', 'fitness', 'new_lr'))
             
     best_fitness = 0
@@ -88,8 +89,8 @@ if __name__ == "__main__":
             # create one large batch
             data_iter = iter(dataloader)
             batch = next(data_iter)[0]
-            # for i in range(3):
-            #     batch = torch.cat((batch, next(data_iter)[0]))
+            for i in range(3):
+                batch = torch.cat((batch, next(data_iter)[0]))
             # prune student model
             print('pruning')
             prune_step(model_S, batch, k, device)
