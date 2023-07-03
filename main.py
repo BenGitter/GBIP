@@ -23,6 +23,7 @@ AT = True
 OT = False
 AG = False
 
+augment = True
 batch_size = 8
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
@@ -67,7 +68,7 @@ if __name__ == "__main__":
 
     # load train+val datasets
     data_dict['train'] = data_dict['val'] # for testing (reduces load time)
-    imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=False)
+    imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
     # optimizer + scaler + loss
@@ -78,7 +79,7 @@ if __name__ == "__main__":
     l_file = open(loss_file, 'w')
     l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
     with open(results_file, 'a') as r_file:
-            r_file.write(f"{k=}, {AT=}, {OT=}, {AG=}, {N=}, {sp=}, {batch_size=}, {hyp['lr0']=}, {hyp['lrf']=}, {hyp['attention_layers']=}\n")
+            r_file.write(f"{k=}, {AT=}, {OT=}, {AG=}, {N=}, {sp=}, {batch_size=}, {hyp['lr0']=}, {hyp['lrf']=}, {hyp['attention_layers']=}, {augment=}\n")
             r_file.write(('{:>10s}'*18 + '\n').format('epoch', 'mp', 'mr', 'mAP50', 'mAP', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg', 'mAP[0]', 'fitness', 'new_lr'))
             
     best_fitness = 0
