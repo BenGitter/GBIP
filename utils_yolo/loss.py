@@ -27,7 +27,7 @@ class ComputeLossOTA:
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
         BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
         KLDcls_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: classification
-        KLDobj_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: objectness
+        BCEobj_OT = nn.BCEWithLogitsLoss() # Transfer Learning: objectness
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
@@ -35,15 +35,15 @@ class ComputeLossOTA:
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
         self.ssi =  0
-        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.KLDobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.AT, self.AG = \
-            BCEcls, BCEobj, KLDcls_OT, KLDobj_OT, model.gr, h, model_T, OT, AT, AG
+        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.BCEobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.AT, self.AG = \
+            BCEcls, BCEobj, KLDcls_OT, BCEobj_OT, model.gr, h, model_T, OT, AT, AG
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 
     def __call__(self, p, targets, imgs, att=None):  # predictions, targets, images, attention maps
         device = targets.device
         l = torch.zeros(9, device=device)
-        lcls, lbox, lobj, lbox_tl, lkl_cls, lkl_obj, lat, lag, lmg = range(9)
+        lcls, lbox, lobj, lbox_tl, lcls_tl, lobj_tl, lat, lag, lmg = range(9)
         bs, as_, gjs, gis, targets, anchors = self.build_targets(p, targets, imgs)
         pre_gen_gains = [torch.tensor(pp.shape, device=device)[[3, 2, 3, 2]] for pp in p] 
 
@@ -110,10 +110,10 @@ class ComputeLossOTA:
                 if self.OT:
                     kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
                     kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
-                    l[lkl_cls] += self.hyp['OT_temp']**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
-                    kl_obj_input = F.logsigmoid(pi[:,:,:,:,4].view(-1, 1))
-                    kl_obj_target = F.logsigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
-                    l[lkl_obj] += self.KLDobj_OT(kl_obj_input, kl_obj_target)
+                    l[lcls_tl] += self.hyp['OT_temp']**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
+                    kl_obj_input = pi[:,:,:,:,4].view(-1, 1)
+                    kl_obj_target = torch.sigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
+                    l[lobj_tl] += self.BCEobj_OT(kl_obj_input, kl_obj_target)
 
             obji = self.BCEobj(pi[..., 4], tobj)
             l[lobj] += obji * self.balance[i]  # obj loss
@@ -127,15 +127,15 @@ class ComputeLossOTA:
         l[lobj] *= self.hyp['obj']
         l[lcls] *= self.hyp['cls']
         l[lbox_tl] *= self.hyp['box']
-        l[lkl_obj] *= self.hyp['obj']
-        l[lkl_cls] *= self.hyp['cls'] * self.hyp['lkl_cls']
+        l[lobj_tl] *= self.hyp['obj']
+        l[lcls_tl] *= self.hyp['cls'] * self.hyp['lkl_cls']
         l[lag] *= self.hyp['lag']
         l[lat] *= self.hyp['lat']
         bs = tobj.shape[0]  # batch size
 
         loss = l[lbox] + l[lobj] + l[lcls]
         if self.OT:
-            loss = self.hyp['OT_alpha'] * (l[lkl_cls] + l[lbox_tl] + l[lkl_obj]) + (1 - self.hyp['OT_alpha']) * loss
+            loss = self.hyp['OT_alpha'] * (l[lcls_tl] + l[lbox_tl] + l[lobj_tl]) + (1 - self.hyp['OT_alpha']) * loss
         if AT:
             loss += l[lat]
         if self.AG:

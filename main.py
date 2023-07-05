@@ -24,7 +24,7 @@ OT = True
 AG = False
 
 augment = True
-batch_size = 32
+batch_size = 8
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     # create losses and results file and write heading
     l_file = open(loss_file, 'w')
-    l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
+    l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'cls_tl', 'obj_tl', 'lat', 'lag', 'total', 'lmg'))
     with open(results_file, 'a') as r_file:
             r_file.write(f"{k=}, {AT=}, {OT=}, {AG=}, {N=}, {sp=}, {batch_size=}, {hyp['lr0']=}, {hyp['lrf']=}, {hyp['attention_layers']=}, {augment=}\n")
             r_file.write(('{:>10s}'*18 + '\n').format('epoch', 'mp', 'mr', 'mAP50', 'mAP', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg', 'mAP[0]', 'fitness', 'new_lr'))
@@ -108,7 +108,7 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         ix = 0
         model_S.train()
-        print(('%8s' * 12) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'kl_cls', 'kl_obj', 'lat', 'lag', 'total', 'lmg'))
+        print(('%8s' * 12) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'cls_tl', 'obj_tl', 'lat', 'lag', 'total', 'lmg'))
         pbar = tqdm(enumerate(dataloader), total=nb)
         for i, (imgs, targets, paths, _) in pbar:
             ni = i + nb * epoch +1
