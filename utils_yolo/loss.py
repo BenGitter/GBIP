@@ -79,22 +79,12 @@ class ComputeLossOTA:
                 # Regression
                 grid = torch.stack([gi, gj], dim=1)
                 pxy = ps[:, :2].sigmoid() * 2. - 0.5
-                #pxy = ps[:, :2].sigmoid() * 3. - 1.
                 pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
                 selected_tbox = targets[i][:, 2:6] * pre_gen_gains[i]
                 selected_tbox[:, :2] -= grid
                 iou = bbox_iou(pbox.T, selected_tbox, x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
                 l[lbox] += (1.0 - iou).mean()  # iou loss
-
-                # Transfer Learning
-                if self.OT:
-                    ps_T = pred_T[i][b, a, gj, gi]
-                    pxy_T = ps_T[:, :2].sigmoid() * 2. - 0.5
-                    pwh_T = (ps_T[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
-                    pbox_T = torch.cat((pxy_T, pwh_T), 1)
-                    iou_TL = bbox_iou(pbox.T, pbox_T, x1y1x2y2=False, CIoU=True)
-                    l[lbox_tl] += (1.0 - iou_TL).mean()
 
                 # Objectness
                 tobj[b, a, gj, gi] = (1.0 - self.gr) + self.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
@@ -106,14 +96,32 @@ class ComputeLossOTA:
                     t[range(n), selected_tcls] = self.cp
                     l[lcls] += self.BCEcls(ps[:, 5:], t)  # BCE
 
-                # Transfer Learning: KL divergence classification
-                if self.OT:
-                    kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
-                    kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
-                    l[lcls_tl] += self.hyp['OT_temp']**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
-                    kl_obj_input = pi[:,:,:,:,4].view(-1, 1)
-                    kl_obj_target = torch.sigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
-                    l[lobj_tl] += self.BCEobj_OT(kl_obj_input, kl_obj_target)
+            # Transfer Learning: IoU loss + KL divergence classification + BCELoss objectness 
+            if self.OT:
+                # create boxes for Teacher
+                pflat_T = pred_T[i].view(-1, 3, 85)
+                pxy_T = pflat_T[:, :, :2].sigmoid() * 2. - 0.5
+                pwh_T = (pflat_T[:, :, 2:4].sigmoid() * 2) ** 2 * self.anchors[i]
+                pbox_T = torch.cat((pxy_T.view(-1, 2), pwh_T.view(-1, 2)), 1)
+                # create boxes for Student
+                pflat_S = pi.view(-1, 3, 85)
+                pxy_S = pflat_S[:, :, :2].sigmoid() * 2. - 0.5
+                pwh_S = (pflat_S[:, :, 2:4].sigmoid() * 2) ** 2 * self.anchors[i]
+                pbox_S = torch.cat((pxy_S.view(-1, 2), pwh_S.view(-1, 2)), 1)
+                # calculate IoU loss between S and T
+                iou_TL = bbox_iou(pbox_S.T, pbox_T, x1y1x2y2=False, CIoU=True)
+                l[lbox_tl] += (1.0 - iou_TL).mean()
+
+                # calculate classification loss between S and T
+                kl_cls_input = F.log_softmax(pi[:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
+                kl_cls_target = F.log_softmax(pred_T[i][:,:,:,:,5:].view(-1, 80) / self.hyp['OT_temp'], dim=1)
+                l[lcls_tl] += self.hyp['OT_temp']**2 * self.KLDcls_OT(kl_cls_input, kl_cls_target)
+                
+                # calculate objectness loss between S and T
+                kl_obj_input = pi[:,:,:,:,4].view(-1, 1)
+                kl_obj_target = torch.sigmoid(pred_T[i][:,:,:,:,4].view(-1, 1))
+                l[lobj_tl] += self.BCEobj_OT(kl_obj_input, kl_obj_target)
+            
 
             obji = self.BCEobj(pi[..., 4], tobj)
             l[lobj] += obji * self.balance[i]  # obj loss
