@@ -17,15 +17,15 @@ from utils_gbip.prune import prune_step
 # params
 N = 30 # 30
 sp = 10 # 10
-k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.6 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
-OT = True
-AG = False
+OT = False
+AG = True
 
-augment = True
+augment = False
 batch_size = 8
-nbs = 64 # nominal batch size
+nbs = 8 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
 img_size = [640, 640]
@@ -51,7 +51,6 @@ if __name__ == "__main__":
     # open data info
     with open(hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)
-        print(hyp['attention_layers'])
     with open(data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)
     with open(struct_file) as f:
@@ -67,7 +66,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
@@ -206,7 +205,7 @@ if __name__ == "__main__":
         imgsz=imgsz_test,
         conf_thres=0.001,
         iou_thres=0.65,
-        model=load_gbip_model(best, nc, hyp.get('anchors'), device),
+        model=load_gbip_model(best, nc, device),
         dataloader=testloader,
         save_dir=save_dir,
         save_json=True,

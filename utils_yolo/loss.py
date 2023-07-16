@@ -127,8 +127,9 @@ class ComputeLossOTA:
             l[lobj] += obji * self.balance[i]  # obj loss
 
             if self.AG:
+                bs_i = pi.shape[0]
                 no = pi.shape[4]
-                in_S = pi.reshape(-1, no)
+                in_S = pi.reshape(bs_i, -1, no)[:, :, 5:]
                 l[lag] += 1/3 * self.adversarial_game.get_student_loss(in_S)
 
         l[lbox] *= self.hyp['box']
@@ -143,7 +144,9 @@ class ComputeLossOTA:
 
         loss = l[lbox] + l[lobj] + l[lcls]
         if self.OT:
-            loss = self.hyp['OT_alpha'] * (l[lcls_tl] + l[lbox_tl] + l[lobj_tl]) + (1 - self.hyp['OT_alpha']) * loss
+            # loss += (l[lcls_tl] + l[lbox_tl] + l[lobj_tl]) * self.hyp['lot']
+            loss += (l[lcls_tl] + l[lobj_tl]) * self.hyp['lot']
+            # loss = self.hyp['OT_alpha'] * (l[lcls_tl] + l[lbox_tl] + l[lobj_tl]) + (1 - self.hyp['OT_alpha']) * loss
         if AT:
             loss += l[lat]
         if self.AG:
@@ -157,10 +160,11 @@ class ComputeLossOTA:
 
         loss_sum = torch.zeros(1).cuda()
         for i in range(3):
+            bs_i = pred_S[i].shape[0]
             no = pred_S[i].shape[4]
-            in_T = pred_T[i].reshape(-1, no)
+            in_T = pred_T[i].reshape(bs_i, -1, no)[:, :, 5:]
             in_S = pred_S[i].detach().clone()
-            in_S = in_S.reshape(-1, no)
+            in_S = in_S.reshape(bs_i, -1, no)[:, :, 5:]
             loss_sum += self.adversarial_game.update(in_S, in_T)
         
         return loss_sum / 3    
