@@ -16,21 +16,21 @@ from utils_gbip.prune import prune_step
 
 # params
 N = 30 # 30
-sp = 10 # 10
-k = 0.6 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+sp = 3 # 10
+k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
 OT = False
 AG = True
 
 augment = False
-batch_size = 8
-nbs = 8 # nominal batch size
+batch_size = 32
+nbs = 32 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
 img_size = [640, 640]
 
-data = './data/coco.yaml'
+data = './data/coco.vast.yaml'
 hyp = './data/hyp.scratch.tiny.yaml'
 struct_file = './data/yolov7_tiny_struct.yaml'
 teacher_weights = './data/yolov7-tiny.pt'
@@ -133,7 +133,7 @@ if __name__ == "__main__":
 
                 # update adversarial model
                 if AG:
-                    loss_items[9] = compute_loss.update_AG(imgs, pred)
+                    loss_items[9] = compute_loss.update_AG2(imgs, pred)
             elif AG:
                 loss_items[9] = mloss[9]
 
