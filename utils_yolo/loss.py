@@ -40,7 +40,7 @@ class ComputeLossOTA:
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 
-    def __call__(self, p, targets, imgs, att=None):  # predictions, targets, images, attention maps
+    def __call__(self, p, targets, imgs, att=None, compute_AG=True):  # predictions, targets, images, attention maps
         device = targets.device
         l = torch.zeros(9, device=device)
         lcls, lbox, lobj, lbox_tl, lcls_tl, lobj_tl, lat, lag, lmg = range(9)
@@ -49,6 +49,9 @@ class ComputeLossOTA:
 
         # Create local AT variable; for validation att is None and so we don't run AT stuff.
         AT = self.AT and att
+        # Create local AG variable; if compute_AG is False do not compute adversarial loss.
+        AG = self.AG and compute_AG
+
         # Run Teacher model with same inputs if AT and/or OT is enabled
         with torch.no_grad():
             if AT:
@@ -126,14 +129,10 @@ class ComputeLossOTA:
             obji = self.BCEobj(pi[..., 4], tobj)
             l[lobj] += obji * self.balance[i]  # obj loss
 
-            # if self.AG:
-            #     no = pi.shape[4]
-            #     in_S = pi.reshape(-1, no)
-            #     l[lag] += 1/3 * self.adversarial_game.get_student_loss(in_S)
-
-        if self.AG:
-            l[lag] = self.adversarial_game.get_student_loss2(p)
-
+            if AG:
+                no = pi.shape[4]
+                in_S = pi.reshape(-1, no)[:, 5:]
+                l[lag] += 1/3 * self.adversarial_game.get_student_loss(in_S)
 
         l[lbox] *= self.hyp['box']
         l[lobj] *= self.hyp['obj']
@@ -150,7 +149,7 @@ class ComputeLossOTA:
             loss = self.hyp['OT_alpha'] * (l[lcls_tl] + l[lbox_tl] + l[lobj_tl]) + (1 - self.hyp['OT_alpha']) * loss
         if AT:
             loss += l[lat]
-        if self.AG:
+        if AG:
             loss += l[lag]
 
         return loss * bs, torch.cat((l[:lag+1], loss.unsqueeze(0), l[lmg].unsqueeze(0))).detach()
@@ -162,21 +161,12 @@ class ComputeLossOTA:
         loss_sum = torch.zeros(1).cuda()
         for i in range(3):
             no = pred_S[i].shape[4]
-            in_T = pred_T[i].reshape(-1, no)
+            in_T = pred_T[i].reshape(-1, no)[:, 5:]
             in_S = pred_S[i].detach().clone()
-            in_S = in_S.reshape(-1, no)
+            in_S = in_S.reshape(-1, no)[:, 5:]
             loss_sum += self.adversarial_game.update(in_S, in_T)
         
         return loss_sum / 3    
-    
-    def update_AG2(self, imgs, p_S):
-        with torch.no_grad():
-            p_T = self.model_T(imgs)[1]
-        
-        p_S[0] = p_S[0].detach().clone()
-        p_S[1] = p_S[1].detach().clone()
-        p_S[2] = p_S[2].detach().clone()
-        return self.adversarial_game.update2(p_S, p_T)
 
     def build_targets(self, p, targets, imgs):
         device = targets.device

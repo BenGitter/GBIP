@@ -7,6 +7,7 @@ import yaml
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
+import math
 
 from utils_yolo.load import load_model, load_gbip_model, load_data, create_optimizer
 from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
@@ -16,21 +17,24 @@ from utils_gbip.prune import prune_step
 
 # params
 N = 30 # 30
-sp = 3 # 10
-k = 0.4 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+sp = 10 # 10
+k = 0.2 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
 OT = False
 AG = True
 
-augment = False
-batch_size = 32
-nbs = 32 # nominal batch size
+augment = True
+batch_size = 8
+nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
 img_size = [640, 640]
 
-data = './data/coco.vast.yaml'
+AG_cycle = 500
+warm_up = 1000
+
+data = './data/coco.yaml'
 hyp = './data/hyp.scratch.tiny.yaml'
 struct_file = './data/yolov7_tiny_struct.yaml'
 teacher_weights = './data/yolov7-tiny.pt'
@@ -66,7 +70,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
 
     # load train+val datasets
-    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
@@ -114,13 +118,18 @@ if __name__ == "__main__":
             imgs = imgs.to(device, non_blocking=True).float() / 255.0
             targets = targets.to(device)            
 
+            # update AG this iteration?
+            compute_AG = math.floor(ix/AG_cycle) % 2
+            if ix < warm_up and (epoch % sp == 0):
+                compute_AG = False
+
             # forward pass
             if AT:
                 pred, att = model_S(imgs, AT=AT, attention_layers=hyp['attention_layers'])
-                loss, loss_items = compute_loss(pred, targets, imgs, att)
+                loss, loss_items = compute_loss(pred, targets, imgs, att, compute_AG=compute_AG)
             else:
                 pred = model_S(imgs)
-                loss, loss_items = compute_loss(pred, targets, imgs)
+                loss, loss_items = compute_loss(pred, targets, imgs, compute_AG=compute_AG)
 
             # backprop
             loss.backward()  
@@ -133,14 +142,14 @@ if __name__ == "__main__":
 
                 # update adversarial model
                 if AG:
-                    loss_items[9] = compute_loss.update_AG2(imgs, pred)
-            elif AG:
-                loss_items[9] = mloss[9]
+                    loss_items[9] = compute_loss.update_AG(imgs, pred)
+
+            loss_items[7] += mloss[7] * (not compute_AG)
+            loss_items[9] += mloss[9] * (compute_AG)
 
             rate = pbar.format_dict['rate']
             remaining = (pbar.total - pbar.n) / rate / 60 if rate and pbar.total else 0
-            # mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-            mloss = (mloss * 9 + loss_items) / 10  # update mean losses
+            mloss = (mloss * 19 + loss_items) / 20  # update mean losses
             mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
             s = ('%8s' * 2 + '%8.4g' * 10) % (
                 '%g/%g' % (epoch, N - 1), mem, *mloss)

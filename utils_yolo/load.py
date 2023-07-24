@@ -103,9 +103,9 @@ def load_model(yolo_struct, nc, anchors, weights, device):
     del ckpt, state_dict
     return model.to(device)
 
-def load_gbip_model(ckpt, nc, anchors, device):
+def load_gbip_model(ckpt, nc, device):
     ckpt = torch.load(ckpt, map_location=device)
-    model = Model(ckpt['struct'], nc=nc, anchors=anchors)
+    model = Model(ckpt['struct'], nc=nc)
     model.load_state_dict(ckpt['state_dict'], strict=False) 
     del ckpt
     return model.to(device)
@@ -116,7 +116,7 @@ def load_data(model, img_size, data_dict, batch_size, hyp, num_workers, device, 
     dataloader, dataset = create_dataloader(data_dict['train'], imgsz, batch_size, gs, hyp=hyp,
                                             augment=augment,  workers=num_workers, prefix=colorstr('train: '))
     testloader = create_dataloader(data_dict['val'], imgsz_test, batch_size, gs, 
-                                        hyp=hyp, rect=True, 
+                                        hyp=hyp, rect=False, 
                                         workers=num_workers,
                                         pad=0.5, prefix=colorstr('val: '))[0]
     
