@@ -491,7 +491,7 @@ class Model(nn.Module):
 
         # Init weights, biases
         initialize_weights(self)
-        self.info()
+        # self.info()
         logger.info('')
 
     def forward(self, x, augment=False, profile=False, AT=False, attention_layers=None):

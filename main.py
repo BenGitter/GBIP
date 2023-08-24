@@ -20,9 +20,9 @@ N = 30 # 30
 sp = 10 # 10
 k = 0.2 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = False
+AT = True
 OT = False
-AG = True
+AG = False
 
 augment = True
 batch_size = 8

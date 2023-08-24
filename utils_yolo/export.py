@@ -29,17 +29,15 @@ data = './data/coco.yaml'
 hyp = './data/hyp.scratch.tiny.yaml'
 yolo_struct = './data/yolov7_tiny_struct.yaml'
 
-G = 3
-T = 0
 
 if __name__ == '__main__':
     t = time.time()
     # arguments
     opt = dotdict({
-        'weights': 'best_N18.pth',
-        'onnx_name': 'best_480_640.onnx',
-        'img_size': [480, 640],
-        # 'img_size': [640, 640],
+        'weights': 'yolov7-tiny.pth',
+        'onnx_name': 'gbip_model.onnx',
+        # 'img_size': [480, 640],
+        'img_size': [640, 640],
         'batch_size': 5,
         'dynamic': False,
         'dynamic_batch': False,
@@ -68,7 +66,8 @@ if __name__ == '__main__':
     # Load PyTorch model
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     nc = int(data_dict['nc']) 
-    model = load_model(yolo_struct, nc, hyp.get('anchors'), opt.weights, G, T, device)
+    model = load_gbip_model(opt.weights, nc, device).eval()
+    # model = load_model(yolo_struct, nc, hyp.get('anchors'), opt.weights, G, T, device)
     labels = model.names
 
     # Checks
