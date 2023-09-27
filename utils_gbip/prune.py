@@ -1,7 +1,7 @@
 import torch
 from torch.nn import Upsample
-from models.common import Conv, Concat, MP, SP
-from models.yolo import Detect
+from models.common import Conv, Concat, MP, SP, SPPCSPC, RepConv, ImplicitA
+from models.yolo import IDetect
 
 # Based on: https://github.com/tyui592/Pruning_filters_for_efficient_convnets/blob/master/prune.py
 
@@ -69,7 +69,14 @@ def get_new_norm(norm, channel_index):
         new_norm.running_var.data = index_remove(norm.running_var.data, 0, channel_index)
         
     return new_norm
-    
+
+def get_new_ia(ia, channel_index):
+    new_ia = ImplicitA(int(ia.channel - len(channel_index)), ia.mean, ia.std)
+    new_ia.implicit.data = index_remove(ia.implicit.data, 1, channel_index)
+
+    return new_ia
+
+
 def replace_nonconv(model, idx):
     # print('[replace_concat]', idx)
     new_idx = []
@@ -109,16 +116,120 @@ def find_removed_in_channels(model, l):
             for f in l_prev:
                 l_f = model.model[f]
                 cin_remove += [x + sum_out for x in l_f.cout_removed]
-                sum_out += l_f.conv.out_channels + len(l_f.cout_removed)
+                if isinstance(l_f, SPPCSPC): # FIX
+                    sum_out += l_f.cv7.conv.out_channels
+                else:
+                    sum_out += l_f.conv.out_channels + len(l_f.cout_removed)
         else:
             cin_remove = model.model[l_prev[0]].cout_removed
     return cin_remove
 
-def fix_input_detect(model, idx):
+def fix_input_idetect(model, idx):
     l = model.model[idx]
     for i in range(l.nl):
         cin_remove = model.model[l.f[i]].cout_removed
         l.m[i] = get_new_conv(l.m[i], 1, cin_remove)
+        l.ia[i] = get_new_ia(l.ia[i], cin_remove)
+
+def prune_repconv(model, l):
+    # first check if previous layers changed output and make sure input matches this change
+    cin_remove = find_removed_in_channels(model, l)
+    l.rbr_dense[0] = get_new_conv(l.rbr_dense[0], 1, cin_remove)
+    l.rbr_1x1[0] = get_new_conv(l.rbr_1x1[0], 1, cin_remove)
+
+    # remove output channels; calculated above
+    l.rbr_dense[0] = get_new_conv(l.rbr_dense[0], 0, l.cout_remove)
+    l.rbr_dense[1] = get_new_norm(l.rbr_dense[1], l.cout_remove)
+    l.rbr_1x1[0] = get_new_conv(l.rbr_1x1[0], 0, l.cout_remove)
+    l.rbr_1x1[1] = get_new_norm(l.rbr_1x1[1], l.cout_remove)
+    l.cout_removed = l.cout_remove
+    del l.cout_remove
+
+    if not hasattr(l, 'remove_hist'):
+        l.remove_hist = []
+        l.remove_hist.append(l.cout_removed)
+
+    # update yaml
+    l.out_channels = l.rbr_dense[0].out_channels
+    model.yaml['head'][l.i-len(model.yaml['backbone'])][3][0] = l.out_channels
+
+def prune_sppcspc(model, l):
+    # first check if previous layers changed output and make sure input matches this change
+    cin_remove = find_removed_in_channels(model, l)
+
+    # match input dim
+    l.cv1.conv = get_new_conv(l.cv1.conv, 1, cin_remove)
+    l.cv2.conv = get_new_conv(l.cv2.conv, 1, cin_remove)
+    l.cv3.conv = get_new_conv(l.cv3.conv, 1, l.cv1.cout_remove)
+    l.cv4.conv = get_new_conv(l.cv4.conv, 1, l.cv3.cout_remove)
+    cv4_cout_remove = torch.tensor(l.cv4.cout_remove)
+    cv4_cout_remove = torch.cat([cv4_cout_remove + l.cv4.conv.out_channels*i for i in range(4)]).tolist()
+    l.cv5.conv = get_new_conv(l.cv5.conv, 1, cv4_cout_remove)
+    l.cv6.conv = get_new_conv(l.cv6.conv, 1, l.cv5.cout_remove)
+    cv7_cin_remove = l.cv6.cout_remove + [x + l.cv6.conv.out_channels for x in l.cv2.cout_remove]
+    l.cv7.conv = get_new_conv(l.cv7.conv, 1, cv7_cin_remove)
+
+    # match output dim
+    l.cv1.conv = get_new_conv(l.cv1.conv, 0, l.cv1.cout_remove)
+    l.cv1.bn = get_new_norm(l.cv1.bn, l.cv1.cout_remove)
+    l.cv2.conv = get_new_conv(l.cv2.conv, 0, l.cv2.cout_remove)
+    l.cv2.bn = get_new_norm(l.cv2.bn, l.cv2.cout_remove)
+    l.cv3.conv = get_new_conv(l.cv3.conv, 0, l.cv3.cout_remove)
+    l.cv3.bn = get_new_norm(l.cv3.bn, l.cv3.cout_remove)
+    l.cv4.conv = get_new_conv(l.cv4.conv, 0, l.cv4.cout_remove)
+    l.cv4.bn = get_new_norm(l.cv4.bn, l.cv4.cout_remove)
+    l.cv5.conv = get_new_conv(l.cv5.conv, 0, l.cv5.cout_remove)
+    l.cv5.bn = get_new_norm(l.cv5.bn, l.cv5.cout_remove)
+    l.cv6.conv = get_new_conv(l.cv6.conv, 0, l.cv6.cout_remove)
+    l.cv6.bn = get_new_norm(l.cv6.bn, l.cv6.cout_remove)
+    l.cv7.conv = get_new_conv(l.cv7.conv, 0, l.cv7.cout_remove)
+    l.cv7.bn = get_new_norm(l.cv7.bn, l.cv7.cout_remove)
+
+    model.yaml['head'][l.i-len(model.yaml['backbone'])][3][0] = l.cv7.conv.out_channels
+    model.yaml['sppcspc'] = {
+        'cv1': [l.cv1.conv.in_channels, l.cv1.conv.out_channels],
+        'cv2': [l.cv2.conv.in_channels, l.cv2.conv.out_channels],
+        'cv3': [l.cv3.conv.in_channels, l.cv3.conv.out_channels],
+        'cv4': [l.cv4.conv.in_channels, l.cv4.conv.out_channels],
+        'cv5': [l.cv5.conv.in_channels, l.cv5.conv.out_channels],
+        'cv6': [l.cv6.conv.in_channels, l.cv6.conv.out_channels],
+        'cv7': [l.cv7.conv.in_channels, l.cv7.conv.out_channels]
+    }
+
+    if not hasattr(l, 'remove_hist'):
+        l.remove_hist = []
+    l.remove_hist.append(l.cv7.cout_remove)
+
+    l.cout_removed = l.cv7.cout_remove
+
+def sppcspc_step(cv, y, k):
+    # calculate importance score and threshold
+    m_l = torch.norm(y.detach(), 1, (0,2,3))
+    m_l = m_l / torch.max(m_l)
+    m_l_p = k * torch.sum(m_l) / cv.conv.out_channels
+    cv.cout_remove = (m_l < m_l_p).nonzero().squeeze(1).tolist()
+
+@torch.no_grad()
+def calculate_removable_channels_sppcspc(model, l, x, k):
+    l_f = model.model[l.i + l.f]
+    y = model.forward_till_layer(x, l_f)
+    y1 = l.cv1(y)
+    sppcspc_step(l.cv1, y1, k)
+    y1 = l.cv3(y1)
+    sppcspc_step(l.cv3, y1, k)
+    y1 = l.cv4(y1)
+    sppcspc_step(l.cv4, y1, k)
+
+    y1 = l.cv5(torch.cat([y1] + [m(y1) for m in l.m], 1))
+    sppcspc_step(l.cv5, y1, k)
+    y1 = l.cv6(y1)
+    sppcspc_step(l.cv6, y1, k)
+
+    y2 = l.cv2(y)
+    sppcspc_step(l.cv2, y2, k)
+
+    out = l.cv7(torch.cat((y1, y2), dim=1))
+    sppcspc_step(l.cv7, out, k)
 
 @torch.no_grad()
 def prune_step(model, img_batch, k, device, verbose=False):
@@ -129,15 +240,20 @@ def prune_step(model, img_batch, k, device, verbose=False):
     # calculate which channels to remove from each layer
     for l in model.model:
         # ignore anything but Conv layers
-        if not isinstance(l, Conv):
+        if not isinstance(l, (Conv, RepConv)):
+            if isinstance(l, (SPPCSPC)):
+                calculate_removable_channels_sppcspc(model, l, x, k)
             continue
-        
+
         y = model.forward_till_layer(x, l)
 
         # calculate importance score and threshold
         m_l = torch.norm(y.detach(), 1, (0,2,3))
         m_l = m_l / torch.max(m_l)
-        m_l_p = k * torch.sum(m_l) / l.conv.out_channels
+        if isinstance(l, RepConv):
+            m_l_p = k * torch.sum(m_l) / l.out_channels
+        else:
+            m_l_p = k * torch.sum(m_l) / l.conv.out_channels
         cout_remove = (m_l < m_l_p).nonzero().squeeze(1).tolist()
         if verbose:
             print(cout_remove)
@@ -146,12 +262,16 @@ def prune_step(model, img_batch, k, device, verbose=False):
         l.cout_remove = cout_remove
 
     # actually remove channels and make sure input channels still match
-    l_detect = 0
+    l_idetect = 0
     for l in model.model:
         # ignore anything but Conv layers and save Detect() layer number
         if not isinstance(l, Conv):
-            if isinstance(l, Detect):
-                l_detect = l.i
+            if isinstance(l, IDetect):
+                l_idetect = l.i
+            elif isinstance(l, RepConv):
+                prune_repconv(model, l)
+            elif isinstance(l, SPPCSPC):
+                prune_sppcspc(model, l)
             continue
 
         # first check if previous layers changed output and make sure input matches this change
@@ -175,7 +295,7 @@ def prune_step(model, img_batch, k, device, verbose=False):
             model.yaml['head'][l.i-len(model.yaml['backbone'])][3][0] = l.conv.out_channels
     
     # make sure input channels of Detect() still match
-    fix_input_detect(model, l_detect)
+    fix_input_idetect(model, l_idetect)
 
     # test full model
     model.to(device)

@@ -16,28 +16,30 @@ from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 30 # 30
-sp = 10 # 10
-k = 0.2 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+N = 3 # 30
+sp = 2 # 10
+k = 0.7 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = True
 OT = False
 AG = False
 
-augment = True
-batch_size = 8
+augment = False
+batch_size = 2
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
 num_workers = 4
 img_size = [640, 640]
 
-AG_cycle = 500
-warm_up = 1000
+# AG_cycle = 500
+# warm_up = 1000
+AG_cycle = 1
+warm_up = 1
 
 data = './data/coco.yaml'
-hyp = './data/hyp.scratch.tiny.yaml'
-struct_file = './data/yolov7_tiny_struct.yaml'
-teacher_weights = './data/yolov7-tiny.pt'
+hyp = './data/hyp.scratch.p5.yaml'
+struct_file = './data/yolov7.yaml'
+teacher_weights = './data/yolov7_training.pt'
 
 save_dir = Path(increment_path(Path('tmp/training'), exist_ok=False))
 wdir = save_dir / 'weights'
@@ -65,19 +67,22 @@ if __name__ == "__main__":
     nc = int(data_dict['nc'])
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     cuda = device.type != 'cpu'
-
-    model_T = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device).eval() # teacher model
+    
+    if AT or OT or AG:
+        model_T = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device).eval() # teacher model
+    else:
+        model_T = None
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
-
+    
     # load train+val datasets
-    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
     # optimizer + scaler + loss
     optimizer, scheduler = create_optimizer(model_S, hyp)
     compute_loss = ComputeLossOTA(model_S, model_T=model_T, OT=OT, AT=AT, AG=AG)
-
+    
     # create losses and results file and write heading
     l_file = open(loss_file, 'w')
     l_file.write(('%10s' * 12 + '\n') % ('epoch', 'gpu_mem', 'box', 'obj', 'cls', 'box_tl', 'cls_tl', 'obj_tl', 'lat', 'lag', 'total', 'lmg'))
@@ -161,8 +166,8 @@ if __name__ == "__main__":
                 '%g/%g' % (epoch, N - 1), mem, *loss_items)
                 l_file.write(s)
 
-            # if ix == 10:
-            #     break
+            if ix == 30:
+                break
 
         # end batch
         scheduler.step()
@@ -221,17 +226,4 @@ if __name__ == "__main__":
         plots=True,
         is_coco=True
     )
-    torch.cuda.empty_cache()
-
-
-# Effect of using Attention Transfer (AT), Output Transfer (OT) and/or Adversarial Game (AG):
-#        ResNet-56/CIFAR-100    ResNet-18/ImageNet
-# 1. AT:    +.12                    +.14    (3)
-# 2. OT:    +.15                    +.42    (1)
-# 3. AG:    +.13                    +.25    (2)
-
-# TODO:
-# [X] Implement pruning step
-# [X] Implement Teacher + Student training (most effective)
-# [X] Try Attention Transfer (minor effect, but should be relatively easy)
-# [X] Try Adversarial Game (larger effect, but probably harder)
+    print('Fitness:', fitness(np.array(results).reshape(1, -1)))

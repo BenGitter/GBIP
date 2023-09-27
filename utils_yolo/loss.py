@@ -24,19 +24,18 @@ class ComputeLossOTA:
             self.adversarial_game = AdversarialGame(device)
 
         # Define criteria
-        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
-        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
-        KLDcls_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: classification
-        BCEobj_OT = nn.BCEWithLogitsLoss() # Transfer Learning: objectness
+        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
+        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        self.KLDcls_OT = nn.KLDivLoss(reduction='batchmean', log_target=True) # KL Divergence Transfer Learning: classification
+        self.BCEobj_OT = nn.BCEWithLogitsLoss() # Transfer Learning: objectness
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
 
         det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
-        self.ssi =  0
-        self.BCEcls, self.BCEobj, self.KLDcls_OT, self.BCEobj_OT, self.gr, self.hyp, self.model_T, self.OT, self.AT, self.AG = \
-            BCEcls, BCEobj, KLDcls_OT, BCEobj_OT, model.gr, h, model_T, OT, AT, AG
+        self.ssi = 0
+        self.gr, self.hyp, self.model_T, self.OT, self.AT, self.AG = model.gr, h, model_T, OT, AT, AG
         for k in 'na', 'nc', 'nl', 'anchors', 'stride':
             setattr(self, k, getattr(det, k))
 

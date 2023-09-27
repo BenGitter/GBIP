@@ -84,7 +84,7 @@ def create_param_groups(model):
 
 def create_optimizer(model, hyp):
     pg0, pg1, pg2 = create_param_groups(model)
-    assert len(pg0) == 55 and len(pg1) == 58 and len(pg2) == 58, 'Found {}, {}, {}'.format(len(pg0), len(pg1), len(pg2))
+    # assert len(pg0) == 55 and len(pg1) == 58 and len(pg2) == 58, 'Found {}, {}, {}'.format(len(pg0), len(pg1), len(pg2))
     optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})
     optimizer.add_param_group({'params': pg2})
@@ -103,10 +103,26 @@ def load_model(yolo_struct, nc, anchors, weights, device):
     del ckpt, state_dict
     return model.to(device)
 
+def update_sppcspc(l, struct):
+    for key in struct:
+        cin, cout = struct[key]
+        lk = l.__getattr__(key)
+        k = lk.conv.kernel_size
+        s = lk.conv.stride
+        p = lk.conv.padding
+        lk.conv = nn.Conv2d(cin, cout, k, s, p, bias=False)
+
+        eps = lk.bn.eps
+        mom = lk.bn.momentum
+        aff = lk.bn.affine
+        track = lk.bn.track_running_stats
+        lk.bn = nn.BatchNorm2d(cout, eps, mom, aff, track)
+
 def load_gbip_model(ckpt, nc, device):
     ckpt = torch.load(ckpt, map_location=device)
     model = Model(ckpt['struct'], nc=nc)
-    model.load_state_dict(ckpt['state_dict'], strict=False) 
+    update_sppcspc(model.model[51], ckpt['struct']['sppcspc'])
+    model.load_state_dict(ckpt['state_dict'], strict=True) 
     del ckpt
     return model.to(device)
 
