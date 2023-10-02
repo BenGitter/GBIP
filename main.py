@@ -16,11 +16,11 @@ from utils_yolo.loss import ComputeLossOTA
 from utils_gbip.prune import prune_step
 
 # params
-N = 3 # 30
+N = 10 # 30
 sp = 2 # 10
-k = 0.7 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+k = 0.6 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
-AT = True
+AT = False
 OT = False
 AG = False
 
@@ -145,9 +145,9 @@ if __name__ == "__main__":
                 optimizer.step()
                 optimizer.zero_grad()
 
-                # update adversarial model
-                if AG:
-                    loss_items[9] = compute_loss.update_AG(imgs, pred)
+            # update adversarial model
+            if AG and not compute_AG:
+                loss_items[9] = compute_loss.update_AG(imgs, pred)
 
             loss_items[7] += mloss[7] * (not compute_AG)
             loss_items[9] += mloss[9] * (compute_AG)
@@ -166,7 +166,7 @@ if __name__ == "__main__":
                 '%g/%g' % (epoch, N - 1), mem, *loss_items)
                 l_file.write(s)
 
-            if ix == 30:
+            if ix == 1:
                 break
 
         # end batch
@@ -175,38 +175,38 @@ if __name__ == "__main__":
         print('New learning rate:', new_lr)
 
         # run validation at end of each epoch
-        results, maps = test(
-            data_dict,
-            batch_size=batch_size * 2,
-            imgsz=imgsz_test,
-            model=model_S,
-            dataloader=testloader,
-            compute_loss=compute_loss,
-            is_coco=True,
-            plots=False,
-            iou_thres=0.65
-        )[0:2]
-        print('Person mAP:', maps[0])
-        fi = fitness(np.array(results).reshape(1, -1))
-        if fi > best_fitness:
-            best_fitness = fi
-            # save best
-            torch.save({
-                'state_dict': model_S.state_dict(),
-                'struct': model_S.yaml
-            }, best)
-            print('Found higher fitness:', best_fitness)
-        else:
-            print('Fitness not higher:', fi)
-        # save last
-        torch.save({
-            'state_dict': model_S.state_dict(),
-            'struct': model_S.yaml
-        }, last)
+        # results, maps = test(
+        #     data_dict,
+        #     batch_size=batch_size * 2,
+        #     imgsz=imgsz_test,
+        #     model=model_S,
+        #     dataloader=testloader,
+        #     compute_loss=compute_loss,
+        #     is_coco=True,
+        #     plots=False,
+        #     iou_thres=0.65
+        # )[0:2]
+        # print('Person mAP:', maps[0])
+        # fi = fitness(np.array(results).reshape(1, -1))
+        # if fi > best_fitness:
+        #     best_fitness = fi
+        #     # save best
+        #     torch.save({
+        #         'state_dict': model_S.state_dict(),
+        #         'struct': model_S.yaml
+        #     }, best)
+        #     print('Found higher fitness:', best_fitness)
+        # else:
+        #     print('Fitness not higher:', fi)
+        # # save last
+        # torch.save({
+        #     'state_dict': model_S.state_dict(),
+        #     'struct': model_S.yaml
+        # }, last)
 
-        # write results to file
-        with open(results_file, 'a') as r_file:
-            r_file.write(('{:7d}/{:2d}' + '{:10.4g}'*16 + '{:10.2e}\n').format(epoch, N-1, *results, maps[0], fi[0], new_lr)) # append metrics, val_loss
+        # # write results to file
+        # with open(results_file, 'a') as r_file:
+        #     r_file.write(('{:7d}/{:2d}' + '{:10.4g}'*16 + '{:10.2e}\n').format(epoch, N-1, *results, maps[0], fi[0], new_lr)) # append metrics, val_loss
 
     # end epoch
 

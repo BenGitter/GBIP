@@ -248,7 +248,7 @@ def prune_step(model, img_batch, k, device, verbose=False):
         y = model.forward_till_layer(x, l)
 
         # calculate importance score and threshold
-        m_l = torch.norm(y.detach(), 1, (0,2,3))
+        m_l = torch.norm(y.detach(), 1, (2,3)).mean(0)
         m_l = m_l / torch.max(m_l)
         if isinstance(l, RepConv):
             m_l_p = k * torch.sum(m_l) / l.out_channels
