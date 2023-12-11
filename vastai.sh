@@ -6,6 +6,7 @@ nvidia-smi  # GPU info
 # Download GBIP/KSE
 cd /workspace
 git clone https://github.com/BenGitter/GBIP.git
+git clone -b full_yolo https://github.com/BenGitter/GBIP.git
 git clone -b YOLO+COCO https://github.com/BenGitter/KSE.git
 cd GBIP
 

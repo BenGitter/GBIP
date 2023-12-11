@@ -593,7 +593,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 sample_labels, sample_images, sample_masks = [], [], [] 
                 while len(sample_labels) < 30:
                     sample_labels_, sample_images_, sample_masks_ = load_samples(self, random.randint(0, len(self.labels) - 1))
-                    sample_labels += sample_labels_
+                    sample_labels += sample_labels_ 
                     sample_images += sample_images_
                     sample_masks += sample_masks_
                     #print(len(sample_labels))

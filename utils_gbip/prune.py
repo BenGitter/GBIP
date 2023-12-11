@@ -3,6 +3,8 @@ from torch.nn import Upsample
 from models.common import Conv, Concat, MP, SP, SPPCSPC, RepConv, ImplicitA
 from models.yolo import IDetect
 
+from tqdm import tqdm
+
 # Based on: https://github.com/tyui592/Pruning_filters_for_efficient_convnets/blob/master/prune.py
 
 def get_removed_channels(model, layers):
@@ -204,7 +206,7 @@ def prune_sppcspc(model, l):
 
 def sppcspc_step(cv, y, k):
     # calculate importance score and threshold
-    m_l = torch.norm(y.detach(), 1, (0,2,3))
+    m_l = torch.norm(y.detach(), 1, (2,3)).mean(0)
     m_l = m_l / torch.max(m_l)
     m_l_p = k * torch.sum(m_l) / cv.conv.out_channels
     cv.cout_remove = (m_l < m_l_p).nonzero().squeeze(1).tolist()
@@ -230,6 +232,145 @@ def calculate_removable_channels_sppcspc(model, l, x, k):
 
     out = l.cv7(torch.cat((y1, y2), dim=1))
     sppcspc_step(l.cv7, out, k)
+
+
+@torch.no_grad()
+def prune_layer(model, l, dataloader, k, num_bs, device):
+    model.eval()
+    model.to(device)
+
+    cout = l.conv.out_channels
+    cout_bs = torch.zeros((num_bs, cout))
+    data_iter = iter(dataloader)
+    m_l = torch.zeros(cout).to(device)
+
+    l_prev = 0
+    if l.f < 0:
+        l_prev = l.i + l.f
+    else:
+        l_prev = l.f
+    l_prev = model.model[l_prev]
+    
+    for i in range(num_bs):
+        b = next(data_iter)[0]
+        x = b.to(device).float() / 255.0
+
+        if l.i == 0:
+            y = l.conv(x)
+        elif isinstance(l, RepConv):
+            y = model.forward_till_layer(x, l)
+        else:
+            y = model.forward_till_layer(x, l_prev)
+            y = l.conv(y)
+
+        m_l += torch.norm(y.detach(), 1, (2,3)).mean(0)
+        m_l_m = m_l / torch.max(m_l)
+        m_l_p = k * torch.sum(m_l_m) / cout
+        cout_remove = (m_l_m < m_l_p).nonzero().squeeze(1).tolist()
+        cout_bs[i, cout_remove] = 1
+    
+    return cout_bs
+
+@torch.no_grad()
+def prune_step2(model, dataloader, k, num_bs, device, verbose=False):
+    model.eval()
+    model.to(device)
+
+    # batch = next(data_iter)[0]
+    # x = batch.to(device).float() / 255.0
+
+    # calculate which channels to remove from each layer
+    for l in tqdm(model.model):
+    # for l in (model.model):
+        # ignore anything but Conv layers
+        if not isinstance(l, (Conv, RepConv)):
+            if isinstance(l, (SPPCSPC)):
+                data_iter = iter(dataloader)
+                b = next(data_iter)[0]
+                for i in range(3):
+                    b = torch.cat((b, next(data_iter)[0]))
+                calculate_removable_channels_sppcspc(model, l, x, k)
+            continue
+
+        if isinstance(l, RepConv):
+            cout = l.out_channels
+        else:
+            cout = l.conv.out_channels
+
+        l_prev = 0
+        if l.f < 0:
+            l_prev = l.i + l.f
+        else:
+            l_prev = l.f
+        l_prev = model.model[l_prev]
+
+        data_iter = iter(dataloader)
+        m_l = torch.zeros(cout).to(device)
+        for i in range(num_bs):
+            b = next(data_iter)[0]
+            x = b.to(device).float() / 255.0
+            if l.i == 0:
+                y = l.conv(x)
+            elif isinstance(l, RepConv):
+                y = model.forward_till_layer(x, l)
+            else:
+                y = model.forward_till_layer(x, l_prev)
+                y = l.conv(y)
+            m_l += torch.norm(y.detach(), 1, (2,3)).mean(0)
+        m_l_m = m_l / torch.max(m_l)
+        m_l_p = k * torch.sum(m_l_m) / cout
+        cout_remove = (m_l_m < m_l_p).nonzero().squeeze(1).tolist()
+        print(cout_remove)
+        # calculate importance score and threshold
+        # m_l = torch.norm(y.detach(), 1, (2,3)).mean(0)
+        # m_l = m_l / torch.max(m_l)
+        # m_l_p = k * torch.sum(m_l) / cout
+        # cout_remove = (m_l < m_l_p).nonzero().squeeze(1).tolist()
+        # if verbose:
+        #     print(cout_remove)
+
+        # set indices of channels to be removed
+        l.cout_remove = cout_remove
+
+    # actually remove channels and make sure input channels still match
+    l_idetect = 0
+    for l in model.model:
+        # ignore anything but Conv layers and save Detect() layer number
+        if not isinstance(l, Conv):
+            if isinstance(l, IDetect):
+                l_idetect = l.i
+            elif isinstance(l, RepConv):
+                prune_repconv(model, l)
+            elif isinstance(l, SPPCSPC):
+                prune_sppcspc(model, l)
+            continue
+
+        # first check if previous layers changed output and make sure input matches this change
+        cin_remove = find_removed_in_channels(model, l)
+        l.conv = get_new_conv(l.conv, 1, cin_remove)
+        
+        # remove output channels; calculated above
+        l.conv = get_new_conv(l.conv, 0, l.cout_remove)
+        l.bn = get_new_norm(l.bn, l.cout_remove)
+        l.cout_removed = l.cout_remove
+        del l.cout_remove
+
+        if not hasattr(l, 'remove_hist'):
+            l.remove_hist = []
+        l.remove_hist.append(l.cout_removed)
+
+        # update yaml
+        if l.i < len(model.yaml['backbone']):
+            model.yaml['backbone'][l.i][3][0] = l.conv.out_channels
+        else:
+            model.yaml['head'][l.i-len(model.yaml['backbone'])][3][0] = l.conv.out_channels
+    
+    # make sure input channels of Detect() still match
+    fix_input_idetect(model, l_idetect)
+
+    # test full model
+    model.to(device)
+    y = model(x)
 
 @torch.no_grad()
 def prune_step(model, img_batch, k, device, verbose=False):

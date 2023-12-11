@@ -8,31 +8,33 @@ import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 import math
+from time import time
 
 from utils_yolo.load import load_model, load_gbip_model, load_data, create_optimizer
 from utils_yolo.general import check_dataset, fitness, increment_path, init_seeds
 from utils_yolo.test import test
 from utils_yolo.loss import ComputeLossOTA
-from utils_gbip.prune import prune_step
+from utils_gbip.prune import prune_step, prune_step2, prune_layer
 
 # params
-N = 10 # 30
-sp = 2 # 10
-k = 0.6 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
+N = 1 # 30
+sp = 10 # 10
+k = 0.8 # (0,1) = pruning threshold factor -> 0 = no pruning, 1 = empty network
 
 AT = False
 OT = False
 AG = False
 
-augment = False
+augment = True
 batch_size = 2
 nbs = 64 # nominal batch size
 accumulate = max(round(nbs / batch_size), 1)
-num_workers = 4
+num_bs = accumulate * 4 # results in a batch size of 64 * 4 = 256
+num_workers = 1
 img_size = [640, 640]
 
 # AG_cycle = 500
-# warm_up = 1000
+# warm_up = 500
 AG_cycle = 1
 warm_up = 1
 
@@ -47,6 +49,12 @@ last = wdir / 'last.pth'
 best = wdir / 'best.pth'
 results_file = save_dir / 'results.txt'
 loss_file = save_dir / 'losses.txt'
+
+
+def plot_pbs(cout):
+    import matplotlib.pyplot as plt
+    plt.imshow(np.array(cout.t()), cmap='hot')
+    plt.show()
 
 if __name__ == "__main__":
     print('AT={}, OT={}, AG={}'.format(AT, OT, AG))
@@ -75,7 +83,7 @@ if __name__ == "__main__":
     model_S = load_model(struct_file, nc, hyp.get('anchors'), teacher_weights, device) # student model
     
     # load train+val datasets
-    data_dict['train'] = data_dict['val'] # for testing (reduces load time)
+    # data_dict['train'] = data_dict['val'] # for testing (reduces load time)
     imgsz_test, dataloader, dataset, testloader, hyp, model_S = load_data(model_S, img_size, data_dict, batch_size, hyp, num_workers, device, augment=augment)
     nb = len(dataloader)        # number of batches
 
@@ -96,21 +104,53 @@ if __name__ == "__main__":
         # prune student model every sp epochs
         if epoch % sp == 0:
             # create one large batch
-            data_iter = iter(dataloader)
-            batch = next(data_iter)[0]
-            for i in range(3):
-                batch = torch.cat((batch, next(data_iter)[0]))
+            # data_iter = iter(dataloader)
+            # batch = next(data_iter)[0]
+            # for i in range(3):
+            #     batch = torch.cat((batch, next(data_iter)[0]))
             # prune student model
             print('pruning')
-            prune_step(model_S, batch, k, device)
+            # prune_step(model_S, batch, k, device)
+            num_bs = accumulate * 32
+            # prune_step2(model_S, dataloader, k, num_bs, device)
+            idx = 24
+            l = model_S.model[idx]
+            cout = prune_layer(model_S, l, dataloader, k, num_bs, device)
+            torch.save(cout, 'cout_l{}_k08.pt'.format(idx))
+            idx = 101
+            l = model_S.model[idx]
+            cout = prune_layer(model_S, l, dataloader, k, num_bs, device)
+            torch.save(cout, 'cout_l{}_k08.pt'.format(idx))
+            idx = 11
+            l = model_S.model[idx]
+            cout = prune_layer(model_S, l, dataloader, k, num_bs, device)
+            torch.save(cout, 'cout_l{}_k08.pt'.format(idx))
+            idx = 63
+            l = model_S.model[idx]
+            cout = prune_layer(model_S, l, dataloader, k, num_bs, device)
+            torch.save(cout, 'cout_l{}_k08.pt'.format(idx))
+            # plot_pbs(cout)
+            exit()
+            # import matplotlib.pyplot as plt
+            # import numpy as np
+            # plt.imshow(np.array(cout.t()), cmap='hot')
+            # plt.show()
+            # exit()
             optimizer, scheduler = create_optimizer(model_S, hyp)
-            del data_iter, batch
+            # del data_iter, batch
 
             # update best_fitness + index
             best_fitness = 0
             pruning_cycle += 1
             last = wdir / 'last{}.pth'.format(pruning_cycle)
             best = wdir / 'best{}.pth'.format(pruning_cycle)
+
+            torch.save({
+                'state_dict': model_S.state_dict(),
+                'struct': model_S.yaml
+            }, last)
+
+            # TODO: print params + FLOPs
         
         mloss = torch.zeros(10, device=device)
         optimizer.zero_grad()
@@ -166,47 +206,51 @@ if __name__ == "__main__":
                 '%g/%g' % (epoch, N - 1), mem, *loss_items)
                 l_file.write(s)
 
-            if ix == 1:
+            if ni == 1:
                 break
 
         # end batch
         scheduler.step()
         new_lr = optimizer.param_groups[0]["lr"]
         print('New learning rate:', new_lr)
-
+        torch.save({
+                'state_dict': model_S.state_dict(),
+                'struct': model_S.yaml
+            }, best)
+        exit()
         # run validation at end of each epoch
-        # results, maps = test(
-        #     data_dict,
-        #     batch_size=batch_size * 2,
-        #     imgsz=imgsz_test,
-        #     model=model_S,
-        #     dataloader=testloader,
-        #     compute_loss=compute_loss,
-        #     is_coco=True,
-        #     plots=False,
-        #     iou_thres=0.65
-        # )[0:2]
-        # print('Person mAP:', maps[0])
-        # fi = fitness(np.array(results).reshape(1, -1))
-        # if fi > best_fitness:
-        #     best_fitness = fi
-        #     # save best
-        #     torch.save({
-        #         'state_dict': model_S.state_dict(),
-        #         'struct': model_S.yaml
-        #     }, best)
-        #     print('Found higher fitness:', best_fitness)
-        # else:
-        #     print('Fitness not higher:', fi)
-        # # save last
-        # torch.save({
-        #     'state_dict': model_S.state_dict(),
-        #     'struct': model_S.yaml
-        # }, last)
+        results, maps = test(
+            data_dict,
+            batch_size=batch_size * 2,
+            imgsz=imgsz_test,
+            model=model_S,
+            dataloader=testloader,
+            compute_loss=compute_loss,
+            is_coco=True,
+            plots=False,
+            iou_thres=0.65
+        )[0:2]
+        print('Person mAP:', maps[0])
+        fi = fitness(np.array(results).reshape(1, -1))
+        if fi > best_fitness:
+            best_fitness = fi
+            # save best
+            torch.save({
+                'state_dict': model_S.state_dict(),
+                'struct': model_S.yaml
+            }, best)
+            print('Found higher fitness:', best_fitness)
+        else:
+            print('Fitness not higher:', fi)
+        # save last
+        torch.save({
+            'state_dict': model_S.state_dict(),
+            'struct': model_S.yaml
+        }, last)
 
-        # # write results to file
-        # with open(results_file, 'a') as r_file:
-        #     r_file.write(('{:7d}/{:2d}' + '{:10.4g}'*16 + '{:10.2e}\n').format(epoch, N-1, *results, maps[0], fi[0], new_lr)) # append metrics, val_loss
+        # write results to file
+        with open(results_file, 'a') as r_file:
+            r_file.write(('{:7d}/{:2d}' + '{:10.4g}'*16 + '{:10.2e}\n').format(epoch, N-1, *results, maps[0], fi[0], new_lr)) # append metrics, val_loss
 
     # end epoch
 

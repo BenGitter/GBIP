@@ -29,7 +29,7 @@ paste_in: 0.15  # image copy paste (probability), use 0 for faster training
 loss_ota: 1 # use ComputeLossOTA, use 0 for faster training
 
 # changed/added
-lr0: 0.001  # initial learning rate (SGD=1E-2, Adam=1E-3)
+lr0: 0.0006  # initial learning rate (SGD=1E-2, Adam=1E-3)
 lrf: 0.1  # final OneCycleLR learning rate (lr0 * lrf)
 # loss gains
 lag: .2  # adversarial game 
@@ -38,4 +38,4 @@ lot: 1
 lkl_cls: 0.1 # output transfer cls
 OT_temp: 2
 OT_alpha: 0.3
-attention_layers:  [11, 24, 37, 50, 63, 75, 88, 101]
+attention_layers:  [11, 24, 37, 50, 51, 54, 63, 66, 75, 88, 101, 16, 29, 42]
